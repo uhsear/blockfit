@@ -1,0 +1,1195 @@
+#!/usr/bin/env python
+"""Refuse a block-to-district assignment that does not reconcile, or that sits on the wrong vintage.
+
+The usual way to give each Census block a district is to take the block's centroid and ask which
+district holds it. A block whose centroid falls on water, or just outside the district tiling, is
+then in no district. The district tables still print. They add up to a little less than the county,
+and nothing says so. The same job can also read the 2020 blocks to place 2010 people. Census redraws
+the blocks every decade, so the two files share many GEOIDs and disagree about the rest.
+
+blockfit takes a block extract (one row per block, a GEOID column and count columns, such as the
+CSV that pl94 writes) and an assignment of those blocks to districts. It prints the district
+table, and it refuses unless every block is in exactly one district, the extract and the
+assignment name the same blocks, and the district sums equal the extract. It never reads a
+shapefile and never imports arcpy.
+
+--parts takes the pieces of an overlay of blocks on districts instead (geoid, district, area),
+and gives each block to the district that holds the largest part of it. That is a pure function
+of the table, so the tie rule and the split blocks are reported rather than hidden.
+
+    python blockfit.py --self-test
+    python blockfit.py --blocks blocks.csv --assignment assign.csv --year 2020 --county 99001
+    python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001
+    python blockfit.py --blocks blocks.csv --assignment assign.csv --year 2020 --county 99001 \\
+        --control-total 1234 --out districts.csv --apply
+
+Nothing is written unless --apply is given. Exit codes: 0 reconciled, 1 refused (the data
+disagree), 2 a file could not be read or written, 64 usage error.
+"""
+
+from __future__ import print_function
+
+import argparse
+import csv
+import io
+import math
+import os
+import sys
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+YEARS = ("2010", "2020")
+GEOID_COLUMNS = ("geoid", "geoid10", "geoid20")
+DEFAULT_MEASURE = "total"
+SAMPLE = 5            # example GEOIDs shown per reason; the counts are always exact
+DIGITS = "0123456789"
+RESERVED_COLUMNS = ("district", "blocks")   # the summary CSV names its own
+
+EXIT_OK = 0
+EXIT_REFUSED = 1
+EXIT_IO = 2
+EXIT_USAGE = 64
+
+
+class InputError(Exception):
+    """A file that cannot be read or is malformed. The caller exits 2."""
+
+
+# ------------------------------------------------------------------- pure core
+
+def is_digits(text):
+    """True for a non-empty string of ASCII digits. str.isdigit also accepts other scripts."""
+    return text != "" and all(ch in DIGITS for ch in text)
+
+
+def is_printable_ascii(text):
+    return all(" " <= ch <= "~" for ch in text)
+
+
+def normalise_geoid(text):
+    """Return the 15 digit block GEOID in text, or raise ValueError saying why not.
+
+    A block GEOID is state (2) + county (3) + tract (6) + block (4) digits. A 14 digit
+    value is the one a spreadsheet or an integer column produces for a state whose FIPS
+    code starts with 0, so the message says so.
+    """
+    geoid = text.strip()
+    if not is_digits(geoid):
+        raise ValueError("%s is not a string of ASCII digits" % ascii(text))
+    if len(geoid) == 14:
+        raise ValueError("%s has 14 digits; a leading zero was probably lost" % ascii(text))
+    if len(geoid) != 15:
+        raise ValueError("%s has %d digits; a block GEOID has 15" % (ascii(text), len(geoid)))
+    return geoid
+
+
+def district_key(district):
+    """Sort whole numbers as numbers, then everything else as text."""
+    if is_digits(district):
+        return (0, int(district), district)
+    return (1, 0, district)
+
+
+def collect_assignment(rows):
+    """rows: (geoid, district) pairs. -> (assign, repeated, conflicting).
+
+    The first district seen for a block is kept. A block named twice with the same district
+    is repeated; with two districts it is conflicting. Either way the caller refuses.
+    """
+    assign = {}
+    repeated = set()
+    conflicting = set()
+    for geoid, district in rows:
+        if geoid not in assign:
+            assign[geoid] = district
+        elif assign[geoid] == district:
+            repeated.add(geoid)
+        else:
+            conflicting.add(geoid)
+    return assign, sorted(repeated), sorted(conflicting)
+
+
+def max_overlap(pieces):
+    """pieces: (geoid, district, area) triples. -> (assign, info).
+
+    Each block goes to the district holding the largest summed area of it. A tie goes to the
+    lowest district by district_key, and the block is listed in info["ties"]. A piece with
+    area 0 is counted in info["empty"] and ignored. A block with no positive piece is left
+    out of assign, so the reconcile reports it as unassigned. info["split"] maps each block
+    that touches more than one district to how many.
+
+    math.fsum is exact on every Python. The built-in sum is only compensated from 3.12, so
+    on 3.9 to 3.11 it could break a tie by rounding, and the two hosts would disagree.
+    """
+    parts = {}
+    empty = 0
+    for geoid, district, area in pieces:
+        if area <= 0:
+            empty += 1
+            continue
+        parts.setdefault(geoid, {}).setdefault(district, []).append(area)
+    assign = {}
+    split = {}
+    ties = []
+    for geoid, per_district in parts.items():
+        ranked = sorted((-math.fsum(areas), district_key(district), district)
+                        for district, areas in per_district.items())
+        assign[geoid] = ranked[0][2]
+        if len(ranked) > 1:
+            split[geoid] = len(ranked)
+            if ranked[1][0] == ranked[0][0]:
+                ties.append(geoid)
+    return assign, {"split": split, "ties": sorted(ties), "empty": empty}
+
+
+def safe(text):
+    """text with every non-ASCII character escaped, so a strict stdout cannot fail on a path."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def sample(items):
+    """Up to SAMPLE items, with the true count when there are more."""
+    shown = ", ".join(items[:SAMPLE])
+    if len(items) > SAMPLE:
+        shown += " (first %d of %d)" % (SAMPLE, len(items))
+    return shown
+
+
+def reconcile(blocks, columns, measure, assign, year, county, tags,
+              repeated=(), conflicting=(), control=None):
+    """Decide whether the assignment reconciles to the extract. Pure: no I/O.
+
+    blocks  geoid -> {column: int}, one entry per extract row
+    assign  geoid -> district
+    tags    (extract_tag, assignment_tag): 10, 20 or None, read from a GEOID10 or GEOID20 header
+    control optional population the extract itself must equal
+
+    Returns a dict. report["ok"] is True only when report["reasons"] is empty.
+    """
+    reasons = []
+    wanted = int(year) % 100
+    for label, tag in zip(("block extract", "assignment"), tags):
+        if tag is not None and tag != wanted:
+            reasons.append("VINTAGE: the %s header says GEOID%d but --year is %s" %
+                           (label, tag, year))
+
+    foreign_blocks = sorted(g for g in blocks if not g.startswith(county))
+    foreign_assign = sorted(g for g in assign if not g.startswith(county))
+    if foreign_blocks:
+        reasons.append("COUNTY: %d extract block(s) are outside county %s: %s" %
+                       (len(foreign_blocks), county, sample(foreign_blocks)))
+    if foreign_assign:
+        reasons.append("COUNTY: %d assignment block(s) are outside county %s: %s" %
+                       (len(foreign_assign), county, sample(foreign_assign)))
+
+    in_extract = set(g for g in blocks if g.startswith(county))
+    in_assign = set(g for g in assign if g.startswith(county))
+    matched = sorted(in_extract & in_assign)
+    unassigned = sorted(in_extract - in_assign)
+    orphans = sorted(in_assign - in_extract)
+
+    if not blocks:
+        reasons.append("EMPTY: the block extract has no rows, so there is nothing to reconcile")
+
+    lost = dict((col, sum(blocks[g][col] for g in unassigned)) for col in columns)
+    if unassigned and orphans:
+        reasons.append(
+            "VINTAGE: %d extract block(s) (%d %s) are in no district and %d assignment block(s) "
+            "are not in the extract; %d of %d assignment blocks match. Census redraws blocks "
+            "every decade, so these files describe different block sets. Rebuild the "
+            "assignment from the %s blocks. Extract only: %s. Assignment only: %s" %
+            (len(unassigned), lost[measure], measure, len(orphans), len(matched),
+             len(in_assign), year, sample(unassigned), sample(orphans)))
+    elif unassigned:
+        reasons.append("UNASSIGNED: %d extract block(s) are in no district, holding %d %s: %s" %
+                       (len(unassigned), lost[measure], measure, sample(unassigned)))
+    elif orphans:
+        reasons.append("ORPHAN: the assignment names %d block(s) the extract does not have: %s" %
+                       (len(orphans), sample(orphans)))
+    if repeated:
+        reasons.append("REPEATED: %d block(s) appear more than once in the assignment: %s" %
+                       (len(repeated), sample(list(repeated))))
+    if conflicting:
+        reasons.append("CONFLICT: %d block(s) are given two districts: %s" %
+                       (len(conflicting), sample(list(conflicting))))
+
+    extract_totals = dict((col, sum(blocks[g][col] for g in in_extract)) for col in columns)
+    if control is not None and extract_totals[measure] != control:
+        reasons.append("CONTROL: the extract holds %d %s but the control total is %d" %
+                       (extract_totals[measure], measure, control))
+
+    districts = {}
+    for geoid in matched:
+        row = districts.setdefault(assign[geoid],
+                                   dict([("blocks", 0)] + [(col, 0) for col in columns]))
+        row["blocks"] += 1
+        for col in columns:
+            row[col] += blocks[geoid][col]
+    assigned_totals = dict((col, sum(row[col] for row in districts.values())) for col in columns)
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "districts": sorted(districts.items(), key=lambda kv: district_key(kv[0])),
+        "columns": list(columns),
+        "measure": measure,
+        "extract_blocks": len(blocks),
+        "assign_blocks": len(assign),
+        "matched": len(matched),
+        "extract_totals": extract_totals,
+        "assigned_totals": assigned_totals,
+        "control": control,
+        "unassigned": unassigned,
+        "orphans": orphans,
+        "lost": lost,
+    }
+
+
+def render(report, names, year, county, parts_info=None):
+    """The text report. names is (extract label, assignment label, 'assignment' or 'parts')."""
+    lines = ["blockfit: %s with %s %s" % (safe(names[0]), names[2], safe(names[1])),
+             "  county %s, %s blocks, count column '%s'" % (county, year, report["measure"]),
+             "",
+             "  blocks in the extract       : %d" % report["extract_blocks"],
+             "  blocks in the assignment    : %d" % report["assign_blocks"],
+             "  blocks in both              : %d" % report["matched"],
+             ""]
+    columns = report["columns"]
+    lines.append("  %-10s %7s %s" % ("DISTRICT", "BLOCKS", " ".join("%12s" % c for c in columns)))
+    for district, row in report["districts"]:
+        lines.append("  %-10s %7d %s" % (district, row["blocks"],
+                                         " ".join("%12d" % row[c] for c in columns)))
+    lines.append("")
+    for col in columns:
+        lines.append("  %-14s districts %d / extract %d" %
+                     (col, report["assigned_totals"][col], report["extract_totals"][col]))
+    if report["control"] is not None:
+        lines.append("  %-14s extract %d / control %d" %
+                     (report["measure"], report["extract_totals"][report["measure"]],
+                      report["control"]))
+    if parts_info is not None:
+        split = parts_info["split"]
+        lines.append("")
+        lines.append("  blocks split across districts: %d, holding %d %s (whole blocks, so this "
+                     "bounds the people the largest-overlap rule can misplace)" %
+                     (len(split), parts_info["people"], report["measure"]))
+        lines.append("  ties on area broken by the lowest district: %d" % len(parts_info["ties"]))
+        lines.append("  pieces with zero area ignored: %d" % parts_info["empty"])
+    lines.append("")
+    if report["ok"]:
+        lines.append("RECONCILED: every block is in exactly one district and the district sums "
+                     "equal the extract.")
+    else:
+        lines.append("REFUSED: %d reason(s)" % len(report["reasons"]))
+        for number, reason in enumerate(report["reasons"], 1):
+            lines.append("  %d. %s" % (number, reason))
+    return "\n".join(lines) + "\n"
+
+
+# -------------------------------------------------------------------------- I/O
+
+def parse_table(data, label):
+    """bytes -> (header, body). header: lowercase names. body: (line number, cells) pairs."""
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise InputError("%s is not UTF-8 text" % label)
+    if "\x00" in text:
+        raise InputError("%s contains a NUL byte" % label)
+    reader = csv.reader(io.StringIO(text, newline=""))
+    rows = []
+    try:
+        for cells in reader:
+            if cells:
+                rows.append((reader.line_num, cells))
+    except csv.Error as exc:
+        raise InputError("%s is not readable CSV: %s" % (label, exc))
+    if not rows:
+        raise InputError("%s has no header row" % label)
+    header = [cell.strip().lower() for cell in rows[0][1]]
+    if not all(is_printable_ascii(name) and name for name in header):
+        raise InputError("%s has an empty or non-ASCII column name" % label)
+    if len(set(header)) != len(header):
+        raise InputError("%s repeats a column name" % label)
+    body = rows[1:]
+    for line, cells in body:
+        if len(cells) != len(header):
+            raise InputError("%s line %d has %d field(s), the header has %d" %
+                             (label, line, len(cells), len(header)))
+    return header, body
+
+
+def read_table(path):
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        raise InputError("cannot read %s: %s" % (path, exc.strerror or exc))
+    return parse_table(data, path)
+
+
+def geoid_column(header, label):
+    """-> (index, tag). tag is 10 or 20 for a GEOID10 or GEOID20 header, else None."""
+    found = [name for name in header if name in GEOID_COLUMNS]
+    if len(found) != 1:
+        raise InputError("%s needs exactly one of the columns %s, found %d" %
+                         (label, "/".join(GEOID_COLUMNS), len(found)))
+    name = found[0]
+    return header.index(name), (int(name[5:]) if name != "geoid" else None)
+
+
+def column(header, name, label):
+    if name not in header:
+        raise InputError("%s has no '%s' column" % (label, name))
+    return header.index(name)
+
+
+def cell_geoid(cells, index, label, line):
+    try:
+        return normalise_geoid(cells[index])
+    except ValueError as exc:
+        raise InputError("%s line %d: %s" % (label, line, exc))
+
+
+def cell_district(cells, index, label, line):
+    district = cells[index].strip()
+    if district == "" or not is_printable_ascii(district):
+        raise InputError("%s line %d: the district is empty or not printable ASCII" %
+                         (label, line))
+    return district
+
+
+def load_blocks(header, body, measure, label):
+    """-> (blocks, columns, tag). blocks maps geoid -> {column: int}."""
+    gi, tag = geoid_column(header, label)
+    columns = [name for i, name in enumerate(header) if i != gi]
+    for name in columns:
+        if name in RESERVED_COLUMNS:
+            raise InputError("%s has a column called '%s', which the district table uses" %
+                             (label, name))
+    if measure not in columns:
+        raise InputError("%s has no '%s' column to count" % (label, measure))
+    blocks = {}
+    for line, cells in body:
+        geoid = cell_geoid(cells, gi, label, line)
+        if geoid in blocks:
+            raise InputError("%s line %d: block %s appears twice" % (label, line, geoid))
+        values = {}
+        for i, name in enumerate(header):
+            if i != gi:
+                if not is_digits(cells[i].strip()):
+                    raise InputError("%s line %d: column '%s' is not a whole number" %
+                                     (label, line, name))
+                values[name] = int(cells[i].strip())
+        blocks[geoid] = values
+    return blocks, columns, tag
+
+
+def load_assignment(header, body, label):
+    """-> (assign, repeated, conflicting, tag)."""
+    gi, tag = geoid_column(header, label)
+    di = column(header, "district", label)
+    rows = [(cell_geoid(cells, gi, label, line), cell_district(cells, di, label, line))
+            for line, cells in body]
+    assign, repeated, conflicting = collect_assignment(rows)
+    return assign, repeated, conflicting, tag
+
+
+def load_parts(header, body, label):
+    """-> (assign, info, tag)."""
+    gi, tag = geoid_column(header, label)
+    di = column(header, "district", label)
+    ai = column(header, "area", label)
+    pieces = []
+    for line, cells in body:
+        try:
+            area = float(cells[ai])
+        except ValueError:
+            raise InputError("%s line %d: area %s is not a number" %
+                             (label, line, ascii(cells[ai])))
+        if not math.isfinite(area) or area < 0:
+            raise InputError("%s line %d: area must be a finite number, 0 or more" %
+                             (label, line))
+        pieces.append((cell_geoid(cells, gi, label, line),
+                       cell_district(cells, di, label, line), area))
+    assign, info = max_overlap(pieces)
+    return assign, info, tag
+
+
+def write_csv(path, header, rows):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def same_file(left, right):
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(os.path.realpath(right))
+
+
+# ------------------------------------------------------------------------- cli
+
+def _parse(argv):
+    parser = argparse.ArgumentParser(
+        prog="blockfit", allow_abbrev=False,
+        description="Refuse a block-to-district assignment that does not reconcile, "
+                    "or that sits on the wrong block vintage.")
+    parser.add_argument("--blocks", help="Block extract CSV: a GEOID column and whole-number "
+                        "count columns. Required.")
+    parser.add_argument("--assignment", help="CSV of geoid,district. Use this or --parts.")
+    parser.add_argument("--parts", help="CSV of geoid,district,area: the pieces of an overlay of "
+                        "blocks on districts. Each block goes to its largest piece.")
+    parser.add_argument("--year", help="Block vintage of --blocks: 2010 or 2020. Required.")
+    parser.add_argument("--county", help="Five digit state plus county FIPS. Required.")
+    parser.add_argument("--measure", default=DEFAULT_MEASURE,
+                        help="Count column that means people (default: %(default)s).")
+    parser.add_argument("--control-total", help="The extract's --measure must equal this number.")
+    parser.add_argument("--out", help="Path for the district summary CSV. Needs --apply.")
+    parser.add_argument("--assign-out", help="Path for the block-to-district CSV that --parts "
+                        "produced. Needs --apply.")
+    parser.add_argument("--apply", action="store_true",
+                        help="Write --out and --assign-out. Without it nothing is written.")
+    parser.add_argument("--allow-unreconciled", action="store_true",
+                        help="Write the outputs even when the check refused. Still exits 1.")
+    parser.add_argument("--self-test", action="store_true",
+                        help="Run the offline assertions and exit.")
+    return parser.parse_args(argv)
+
+
+def usage_problem(args):
+    """The first usage error in args, or None."""
+    for flag in ("blocks", "year", "county"):
+        if getattr(args, flag) is None:
+            return "--%s is required" % flag
+    if (args.assignment is None) == (args.parts is None):
+        return "give exactly one of --assignment and --parts"
+    if args.year not in YEARS:
+        return "--year must be one of %s" % ", ".join(YEARS)
+    if not (is_digits(args.county) and len(args.county) == 5):
+        return "--county must be five ASCII digits: state FIPS then county FIPS"
+    if args.control_total is not None and not is_digits(args.control_total):
+        return "--control-total must be a whole number"
+    if args.assign_out is not None and args.parts is None:
+        return "--assign-out only makes sense with --parts"
+    outputs = [p for p in (args.out, args.assign_out) if p is not None]
+    if outputs and not args.apply:
+        return "--out and --assign-out write files, so they need --apply"
+    if args.apply and not outputs:
+        return "--apply needs --out or --assign-out"
+    inputs = [p for p in (args.blocks, args.assignment, args.parts) if p is not None]
+    for path in outputs:
+        if any(same_file(path, other) for other in inputs):
+            return "%s is also an input; blockfit will not overwrite its input" % path
+    if len(outputs) == 2 and same_file(outputs[0], outputs[1]):
+        return "--out and --assign-out are the same file"
+    return None
+
+
+def main(argv=None, out=None, err=None):
+    args = _parse(argv)
+    out = sys.stdout if out is None else out
+    err = sys.stderr if err is None else err
+    if args.self_test:
+        return self_test()
+    problem = usage_problem(args)
+    if problem is not None:
+        err.write("blockfit: usage: %s\n" % problem)
+        return EXIT_USAGE
+    measure = args.measure.strip().lower()
+    control = None if args.control_total is None else int(args.control_total)
+    try:
+        header, body = read_table(args.blocks)
+        blocks, columns, block_tag = load_blocks(header, body, measure, args.blocks)
+        if args.assignment is not None:
+            other = args.assignment
+            header, body = read_table(other)
+            assign, repeated, conflicting, tag = load_assignment(header, body, other)
+            parts_info = None
+        else:
+            other = args.parts
+            header, body = read_table(other)
+            assign, parts_info, tag = load_parts(header, body, other)
+            repeated = conflicting = ()
+    except InputError as exc:
+        err.write("blockfit: %s\n" % exc)
+        return EXIT_IO
+
+    report = reconcile(blocks, columns, measure, assign, args.year, args.county,
+                       (block_tag, tag), repeated, conflicting, control)
+    if parts_info is not None:
+        parts_info["people"] = sum(blocks[g][measure] for g in parts_info["split"] if g in blocks)
+    text = render(report, (args.blocks, other, "assignment" if parts_info is None else "parts"),
+                  args.year, args.county, parts_info)
+    # The report is flushed before any file is written, so a closed pipe cannot leave a
+    # half-trusted CSV behind a report nobody saw.
+    try:
+        out.write(text)
+        out.flush()
+    except (OSError, ValueError) as exc:
+        err.write("blockfit: cannot write the report: %s\n" % exc)
+        return EXIT_IO
+    code = EXIT_OK if report["ok"] else EXIT_REFUSED
+    if not args.apply:
+        return code
+    if not report["ok"] and not args.allow_unreconciled:
+        err.write("blockfit: nothing written, because the check refused. "
+                  "--allow-unreconciled writes anyway and still exits 1.\n")
+        return code
+    try:
+        if args.out is not None:
+            write_csv(args.out, ["district", "blocks"] + columns,
+                      [[d, row["blocks"]] + [row[c] for c in columns]
+                       for d, row in report["districts"]])
+            out.write("wrote %s (%d row(s))\n" % (safe(args.out), len(report["districts"])))
+        if args.assign_out is not None:
+            write_csv(args.assign_out, ["geoid", "district"], sorted(assign.items()))
+            out.write("wrote %s (%d row(s))\n" % (safe(args.assign_out), len(assign)))
+        out.flush()
+    except (OSError, ValueError) as exc:
+        err.write("blockfit: cannot write: %s\n" % exc)
+        return EXIT_IO
+    return code
+
+
+# ------------------------------------------------------------------- self-test
+
+def self_test():
+    """Offline assertions over synthetic blocks. Returns the exit code.
+
+    No network, no census download, no arcpy. Every file the command line half reads is
+    written here, in a temporary directory, and the real command line is run against it.
+    """
+    import contextlib
+    import shutil
+    import socket
+    import subprocess
+    import tempfile
+
+    passed = [0]
+    failed = []
+
+    def check(cond, label):
+        if cond:
+            passed[0] += 1
+            print("PASS  %s" % label)
+        else:
+            failed.append(label)
+            print("FAIL  %s" % label)
+
+    def raises(fn, label, exc_type=ValueError):
+        try:
+            fn()
+        except exc_type:
+            check(True, label)
+        except Exception as exc:
+            check(False, "%s (wrong exception %r)" % (label, exc))
+        else:
+            check(False, "%s (no error raised)" % label)
+
+    print("blockfit self-test: no network, no census download, no arcpy")
+    print("-" * 68)
+
+    # ---- fixtures. County 99001 is not a real county. Every number is made up.
+    def g(tract, block):
+        return "99001" + tract + block
+
+    G1, G2, G3 = g("000100", "1000"), g("000100", "1001"), g("000100", "1002")
+    G4, G5, G6 = g("000100", "1003"), g("000100", "1004"), g("000200", "2000")
+    BLOCKS = [(G1, 100, 1000), (G2, 200, 2000), (G3, 50, 3000),
+              (G4, 355, 4000), (G5, 0, 500), (G6, 30, 600)]
+    GOOD = [(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "2")]
+    PIECES = [(G1, "1", 1000), (G2, "1", 600), (G2, "2", 400), (G3, "2", 300),
+              (G4, "2", 800), (G5, "2", 500), (G5, "1", 0), (G6, "2", 100), (G6, "1", 100)]
+    blocks = dict((geoid, {"total": t, "arealand": a}) for geoid, t, a in BLOCKS)
+    cols = ["total", "arealand"]
+
+    def rec(assign_rows, **kw):
+        assign, repeated, conflicting = collect_assignment(assign_rows)
+        kw.setdefault("tags", (None, None))
+        return reconcile(blocks, cols, "total", assign, "2020", "99001",
+                         repeated=repeated, conflicting=conflicting, **kw)
+
+    def text_of(report):
+        return " | ".join(report["reasons"])
+
+    # ---- geoid
+    check(normalise_geoid(G1) == G1, "a 15 digit block GEOID is accepted unchanged")
+    check(normalise_geoid("  " + G1 + "\n") == G1, "and surrounding whitespace is stripped")
+    raises(lambda: normalise_geoid(""), "an empty GEOID is refused")
+    raises(lambda: normalise_geoid(G1[:-1] + "A"), "a GEOID with a letter is refused")
+    raises(lambda: normalise_geoid(G1[:-1] + "\u0663"),
+           "a GEOID with an Arabic-Indic digit is refused, because str.isdigit would pass it  "
+           "<-- pinned defect")
+    raises(lambda: normalise_geoid(G1 + "0"), "a 16 digit GEOID is refused")
+    try:
+        normalise_geoid(G1[1:])
+    except ValueError as exc:
+        check("leading zero" in str(exc),
+              "a 14 digit GEOID is refused and the message names the lost leading zero  "
+              "<-- pinned defect")
+    check(is_digits("007") and not is_digits("") and not is_digits("1 "),
+          "is_digits is ASCII only and refuses the empty string")
+    check(is_printable_ascii("District 1") and not is_printable_ascii("caf\u00e9")
+          and not is_printable_ascii("a\tb"), "printable ASCII excludes tabs and accents")
+    check(sorted(["10", "2", "B", "1", "A"], key=district_key) == ["1", "2", "10", "A", "B"],
+          "districts sort 1, 2, 10 then text, not 1, 10, 2")
+    check(sample(["a", "b"]) == "a, b" and "first 5 of 7" in sample(list("abcdefg")),
+          "sample shows five and says how many there are")
+
+    # ---- collect_assignment
+    a, rep, con = collect_assignment([(G1, "1"), (G1, "1"), (G2, "1"), (G2, "2"), (G3, "2")])
+    check(a == {G1: "1", G2: "1", G3: "2"}, "the first district seen for a block is kept")
+    check(rep == [G1] and con == [G2], "a repeat and a conflict are told apart")
+
+    # ---- max_overlap
+    got, info = max_overlap(PIECES)
+    check(got == {G1: "1", G2: "1", G3: "2", G4: "2", G5: "2", G6: "1"},
+          "the largest piece decides: G2 is 600 against 400 and goes to district 1")
+    check(sorted(info["split"]) == sorted([G2, G6]) and info["split"][G2] == 2,
+          "the blocks that touch two districts are listed with how many")
+    check(info["ties"] == [G6], "an exact tie is listed, never silent")
+    check(got[G6] == "1", "and a tie goes to the lowest district")
+    check(info["empty"] == 1, "a zero-area piece is counted and ignored")
+    check(G5 in got and got[G5] == "2",
+          "a block whose only positive piece is district 2 is not dragged to district 1 by "
+          "its zero-area piece  <-- pinned defect")
+    got2, _ = max_overlap([(G1, "2", 1.0), (G1, "1", 0.6), (G1, "1", 0.6)])
+    check(got2[G1] == "1", "pieces of one district add up: 0.6 + 0.6 beats 1.0")
+    fine = [(G1, "1", 1e16), (G1, "1", 1.0), (G1, "1", 1.0), (G1, "2", 1e16 + 2.0)]
+    check(max_overlap(fine)[1]["ties"] == [G1] and
+          max_overlap(list(reversed(fine)))[1]["ties"] == [G1],
+          "pieces summing to the same exact area tie in either order, because the sum is "
+          "exact and a running float sum would not be  <-- pinned defect")
+    got3, info3 = max_overlap([(G1, "1", 0), (G1, "2", 0)])
+    check(got3 == {} and info3["empty"] == 2,
+          "a block with only zero-area pieces is left out, so the reconcile reports it")
+    check(max_overlap([(G1, "2", 5.0), (G1, "10", 5.0)])[0][G1] == "2",
+          "a tie between 2 and 10 goes to 2, the lower number, not the lower text")
+
+    # ---- reconcile
+    ok = rec(GOOD)
+    check(ok["ok"] and ok["reasons"] == [], "a complete assignment reconciles")
+    check(ok["assigned_totals"] == ok["extract_totals"] == {"total": 735, "arealand": 11100},
+          "and the district sums equal the extract on both columns")
+    check([d for d, _ in ok["districts"]] == ["1", "2"] and ok["districts"][1][1]["blocks"] == 4,
+          "the district table has the right block counts")
+
+    centroid = rec([r for r in GOOD if r[0] != G4])
+    check(not centroid["ok"] and centroid["lost"]["total"] == 355,
+          "an assignment missing the block whose centroid fell on water is refused and "
+          "reports the 355 people it lost  <-- pinned defect")
+    check("UNASSIGNED" in text_of(centroid) and "355 total" in text_of(centroid),
+          "and the reason says so in words")
+    check(centroid["assigned_totals"]["total"] == 380,
+          "the district sums add to 380, not the extract's 735, with no error from the "
+          "arithmetic  <-- pinned defect")
+    empty_block = rec([r for r in GOOD if r[0] != G5])
+    check(not empty_block["ok"] and empty_block["lost"]["total"] == 0,
+          "a block with no people missing from the assignment is refused although the "
+          "people still add up  <-- pinned defect")
+    check(empty_block["assigned_totals"]["total"] == empty_block["extract_totals"]["total"],
+          "the population totals agree in that case, so only the block count catches it")
+    check(empty_block["lost"]["arealand"] == 500,
+          "and the lost land area shows what went")
+
+    foreign = [(g("000100", "9" + str(i) + "00"), "1") for i in range(1, 3)]
+    vint = rec([r for r in GOOD if r[0] not in (G4, G5)] + foreign)
+    check(not vint["ok"] and "VINTAGE" in text_of(vint) and "UNASSIGNED" not in text_of(vint),
+          "blocks missing on one side and extra on the other are called a vintage mismatch  "
+          "<-- pinned defect")
+    check("4 of 6 assignment blocks match" in text_of(vint),
+          "and the reason says how many blocks do match")
+    check(vint["unassigned"] == [G4, G5] and vint["orphans"] == sorted(r[0] for r in foreign),
+          "both sides' blocks are listed")
+    orphan = rec(GOOD + [(g("000300", "3000"), "1")])
+    check(not orphan["ok"] and "ORPHAN" in text_of(orphan),
+          "an assignment block that the extract lacks is refused as an orphan")
+    rep = rec(GOOD + [(G1, "1")])
+    check(not rep["ok"] and "REPEATED" in text_of(rep),
+          "a block listed twice with the same district is refused, not double counted  "
+          "<-- pinned defect")
+    con = rec(GOOD + [(G1, "2")])
+    check(not con["ok"] and "CONFLICT" in text_of(con),
+          "a block given two districts is refused")
+    check(con["assigned_totals"]["total"] == 735,
+          "and the first district is kept so the sums are not double counted")
+
+    tag = rec(GOOD, tags=(10, None))
+    check(not tag["ok"] and "extract header says GEOID10" in text_of(tag),
+          "a GEOID10 extract against --year 2020 is refused  <-- pinned defect")
+    tag2 = rec(GOOD, tags=(None, 10))
+    check(not tag2["ok"] and "assignment header says GEOID10" in text_of(tag2),
+          "and so is a GEOID10 assignment")
+    check(rec(GOOD, tags=(20, 20))["ok"], "a GEOID20 header on both sides passes for 2020")
+
+    check(rec(GOOD, control=735)["ok"], "an extract equal to the control total passes")
+    ctrl = rec(GOOD, control=736)
+    check(not ctrl["ok"] and "CONTROL" in text_of(ctrl),
+          "an extract one person off the control total is refused")
+
+    mixed = dict(blocks)
+    mixed["98002000100" + "1000"] = {"total": 9, "arealand": 9}
+    foreign_extract = reconcile(mixed, cols, "total", dict(GOOD), "2020", "99001", (None, None))
+    check(not foreign_extract["ok"] and "extract block(s) are outside county 99001" in
+          text_of(foreign_extract) and "UNASSIGNED" not in text_of(foreign_extract),
+          "an extract block outside the county is refused as a county error, not as a lost "
+          "block")
+    foreign_assign = rec(GOOD + [("98002000100" + "1000", "1")])
+    check(not foreign_assign["ok"] and "assignment block(s) are outside" in
+          text_of(foreign_assign) and "ORPHAN" not in text_of(foreign_assign),
+          "an assignment block outside the county is a county error, not a vintage one")
+    nothing = reconcile({}, cols, "total", {}, "2020", "99001", (None, None))
+    check(not nothing["ok"] and "EMPTY" in text_of(nothing),
+          "an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect")
+
+    # ---- a path with an accent must not crash a strict ASCII stdout
+    check(safe("caf\u00e9.csv") == "caf\\xe9.csv" and safe("plain.csv") == "plain.csv",
+          "a path with an accented letter is printed escaped, so an ASCII pipe cannot raise  "
+          "<-- pinned defect")
+    # ---- reading tables
+    BOM = b"\xef\xbb\xbf"
+    parse = parse_table
+    h, body = parse(BOM + b"GeoID , Total\r\n" + G1.encode() + b",5\r\n\r\n", "t")
+    check(h == ["geoid", "total"] and len(body) == 1,
+          "a BOM, CRLF line ends, padded and capitalised names, and a blank line are all read")
+    raises(lambda: parse(b"\xff\xfe", "t"), "a file that is not UTF-8 is refused", InputError)
+    raises(lambda: parse(b"a,b\n1,\x002\n", "t"), "a NUL byte is refused", InputError)
+    raises(lambda: parse(b"", "t"), "an empty file is refused", InputError)
+    raises(lambda: parse(b"\n\n", "t"), "a file of blank lines is refused", InputError)
+    raises(lambda: parse(b"a,a\n1,2\n", "t"), "a repeated column name is refused", InputError)
+    raises(lambda: parse(b"a,\n1,2\n", "t"), "an empty column name is refused", InputError)
+    raises(lambda: parse("a,caf\u00e9\n1,2\n".encode("utf-8"), "t"),
+           "a non-ASCII column name is refused", InputError)
+    raises(lambda: parse(b"a,b\n1\n", "t"), "a short row is refused, not padded", InputError)
+    raises(lambda: parse(b"a,b\n1,2,3\n", "t"), "a long row is refused", InputError)
+    raises(lambda: parse(b"a\n" + b"x" * 200000 + b"\n", "t"),
+           "a field past the csv module's limit is refused with one line", InputError)
+
+    def blocks_of(text):
+        head, rows = parse(text.encode("utf-8"), "b")
+        return load_blocks(head, rows, "total", "b")
+
+    got_b, got_cols, got_tag = blocks_of("GEOID20,total,arealand\n%s,5,7\n" % G1)
+    check(got_b == {G1: {"total": 5, "arealand": 7}} and got_cols == ["total", "arealand"]
+          and got_tag == 20, "a GEOID20 extract loads and reports its vintage tag")
+    check(blocks_of("geoid,total\n%s,5\n" % G1)[2] is None, "a plain geoid header has no tag")
+    raises(lambda: blocks_of("name,total\nx,5\n"), "an extract without a geoid column is refused",
+           InputError)
+    raises(lambda: blocks_of("geoid,geoid20,total\n%s,%s,5\n" % (G1, G1)),
+           "an extract with two geoid columns is refused", InputError)
+    raises(lambda: blocks_of("geoid,pop\n%s,5\n" % G1),
+           "an extract without the count column is refused", InputError)
+    raises(lambda: blocks_of("geoid,total,district\n%s,5,1\n" % G1),
+           "an extract with a column called district is refused, because the summary uses it",
+           InputError)
+    raises(lambda: blocks_of("geoid,total\n%s,5.0\n" % G1),
+           "a count of 5.0 is refused, not truncated", InputError)
+    raises(lambda: blocks_of("geoid,total\n%s,1,000\n" % G1), "a count with a comma is refused",
+           InputError)
+    raises(lambda: blocks_of("geoid,total\n%s,-1\n" % G1), "a negative count is refused",
+           InputError)
+    raises(lambda: blocks_of("geoid,total\n%s,5\n%s,6\n" % (G1, G1)),
+           "a block twice in the extract is refused, not overwritten  <-- pinned defect",
+           InputError)
+    raises(lambda: blocks_of("geoid,total\n%s,5\n" % G1[1:]),
+           "a 14 digit GEOID in the extract is refused with its line number", InputError)
+
+    def assignment_of(text):
+        head, rows = parse(text.encode("utf-8"), "a")
+        return load_assignment(head, rows, "a")
+
+    a_assign, a_rep, a_con, a_tag = assignment_of("geoid10,district\n%s, 3 \n" % G1)
+    check(a_assign == {G1: "3"} and a_tag == 10, "an assignment loads and strips the district")
+    raises(lambda: assignment_of("geoid\n%s\n" % G1), "an assignment without district is refused",
+           InputError)
+    raises(lambda: assignment_of("geoid,district\n%s,\n" % G1),
+           "a blank district is refused, not read as district ''", InputError)
+    raises(lambda: assignment_of("geoid,district\n%s,D\u00e9\n" % G1),
+           "a non-ASCII district is refused", InputError)
+
+    def parts_of(text):
+        head, rows = parse(text.encode("utf-8"), "p")
+        return load_parts(head, rows, "p")
+
+    p_assign, p_info, p_tag = parts_of("geoid,district,area\n%s,1,2.5\n%s,2,4\n" % (G1, G1))
+    check(p_assign == {G1: "2"} and p_tag is None and p_info["split"] == {G1: 2},
+          "parts load and the larger piece wins")
+    raises(lambda: parts_of("geoid,district\n%s,1\n" % G1), "parts without area are refused",
+           InputError)
+    raises(lambda: parts_of("geoid,district,area\n%s,1,wide\n" % G1),
+           "a text area is refused", InputError)
+    raises(lambda: parts_of("geoid,district,area\n%s,1,nan\n" % G1),
+           "an area of nan is refused, because it compares false to everything  "
+           "<-- pinned defect", InputError)
+    raises(lambda: parts_of("geoid,district,area\n%s,1,inf\n" % G1),
+           "an infinite area is refused", InputError)
+    raises(lambda: parts_of("geoid,district,area\n%s,1,-3\n" % G1),
+           "a negative area is refused", InputError)
+
+    # ---- the CSV that pl94 writes is the input, and a leading zero must survive
+    PL94_HEAD = ("geoid,arealand,areawatr,total,white,black,aian,asian,nhpi,other,"
+                 "two_or_more,hispanic_any_race,housing_units,occupied,vacant")
+    z1, z2 = "09999" + "000100" + "1000", "09999" + "000100" + "1001"
+    zhead, zbody = parse(
+        (PL94_HEAD + "\n%s,10,0,7,3,2,0,1,0,0,1,2,4,3,1\n%s,5,5,0,0,0,0,0,0,0,0,0,0,0,0\n"
+         % (z1, z2)).encode("utf-8"), "pl94.csv")
+    zblocks, zcols, ztag = load_blocks(zhead, zbody, "total", "pl94.csv")
+    check(len(zcols) == 14 and zblocks[z1]["housing_units"] == 4 and ztag is None,
+          "the 15 column CSV that pl94 writes loads, with its 14 count columns")
+    zrep = reconcile(zblocks, zcols, "total", {z1: "1", z2: "1"}, "2020", "09999", (None, None))
+    check(zrep["ok"] and zrep["districts"][0][1]["total"] == 7 and z1.startswith("09"),
+          "a state FIPS that starts with 0 survives as text and the extract reconciles")
+
+    # ---- the files for the command line half
+    tmp = tempfile.mkdtemp(prefix="blockfit-")
+
+    def put(name, text):
+        path = os.path.join(tmp, name)
+        with open(path, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+        return path
+
+    def listing():
+        return sorted(os.listdir(tmp))
+
+    block_text = "geoid,total,arealand\n" + "".join("%s,%d,%d\n" % row for row in BLOCKS)
+    assign_text = "geoid,district\n" + "".join("%s,%s\n" % row for row in GOOD)
+    parts_text = "geoid,district,area\n" + "".join("%s,%s,%s\n" % row for row in PIECES)
+    f_blocks = put("blocks.csv", block_text)
+    f_assign = put("assign.csv", assign_text)
+    f_parts = put("parts.csv", parts_text)
+    f_lost = put("lost.csv", assign_text.replace("%s,2\n" % G4, ""))
+    f_old = put("old.csv", "".join(
+        l if G4 not in l and G5 not in l else l.replace(G4[-4:], "9100").replace(G5[-4:], "9200")
+        for l in assign_text.splitlines(True)))
+    f_dup = put("dup.csv", assign_text + "%s,1\n%s,1\n" % (G1, G3))
+    f_tag10 = put("tag10.csv", assign_text.replace("geoid", "geoid10", 1))
+    before = listing()
+
+    def run(argv, out=None):
+        """-> (exit code, stdout text, stderr text). argparse writes to sys.stderr itself."""
+        out = io.StringIO() if out is None else out
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                code = main(argv, out, err)
+        except SystemExit as exc:
+            code = exc.code
+        text = out.getvalue() if isinstance(out, io.StringIO) and not out.closed else ""
+        return code, text, err.getvalue()
+
+    base = ["--blocks", f_blocks, "--year", "2020", "--county", "99001"]
+
+    # ---- the whole command line must make no network call
+    net_calls = []
+
+    def no_net(*args, **kwargs):
+        net_calls.append(args)
+        raise OSError("blockfit self-test: the network is off")
+
+    saved = (socket.socket, socket.getaddrinfo, socket.create_connection)
+    socket.socket = no_net
+    socket.getaddrinfo = no_net
+    socket.create_connection = no_net
+    try:
+        raises(lambda: socket.create_connection(("blockfit.invalid", 80)),
+               "the network trap itself fires when something dials out", OSError)
+        check(len(net_calls) == 1, "and it recorded the attempt")
+        del net_calls[:]
+        code, out, err = run(base + ["--assignment", f_assign])
+        check(code == 0 and "RECONCILED" in out and err == "",
+              "a complete assignment exits 0 and prints RECONCILED")
+        rows = [line.split() for line in out.splitlines()]
+        check(["DISTRICT", "BLOCKS", "total", "arealand"] in rows and
+              ["1", "2", "300", "3000"] in rows and ["2", "4", "435", "8100"] in rows,
+              "the district table is printed")
+        check("districts 735 / extract 735" in out and "districts 11100 / extract 11100" in out,
+              "and the district sum is printed beside the extract sum for every column")
+        check(listing() == before, "a run without --apply writes nothing at all  <-- pinned defect")
+
+        code, out, err = run(base + ["--assignment", f_lost])
+        check(code == 1 and "REFUSED: 1 reason(s)" in out and "355 total" in out,
+              "an assignment that loses the water block exits 1 and names the 355 people")
+        check("districts 380 / extract 735" in out,
+              "and prints the short district sum against the extract")
+
+        code, out, err = run(base + ["--assignment", f_old])
+        check(code == 1 and "VINTAGE" in out and "Rebuild the assignment from the 2020 blocks" in out,
+              "an assignment on the wrong block set exits 1 and names the vintage")
+
+        code, out, err = run(base + ["--assignment", f_dup])
+        check(code == 1 and "REPEATED" in out, "a repeated block exits 1")
+
+        code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
+                              "--assignment", f_tag10])
+        check(code == 0, "a GEOID10 assignment against --year 2010 reconciles")
+        code, out, err = run(base + ["--assignment", f_tag10])
+        check(code == 1 and "VINTAGE: the assignment header says GEOID10 but --year is 2020" in out,
+              "and against --year 2020 it is refused  <-- pinned defect")
+
+        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "735"])
+        check(code == 0 and "extract 735 / control 735" in out, "a matching control total passes")
+        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "7350"])
+        check(code == 1 and "CONTROL" in out, "a wrong control total exits 1")
+
+        code, out, err = run(base + ["--parts", f_parts])
+        check(code == 0 and "RECONCILED" in out,
+              "pieces that cover every block reconcile, including the water block the "
+              "centroid rule lost")
+        check("blocks split across districts: 2, holding 230 total" in out and
+              "ties on area broken by the lowest district: 1" in out and
+              "pieces with zero area ignored: 1" in out,
+              "and the split blocks, the tie and the ignored piece are reported")
+        check(listing() == before, "a --parts run without --apply writes nothing")
+        code, out, err = run(base + ["--parts", put("p2.csv", parts_text.replace(
+            "%s,2,800\n" % G4, ""))])
+        check(code == 1 and "355 total" in out,
+              "pieces with no part for the water block are refused like a lost block")
+
+        # --- writing
+        o1 = os.path.join(tmp, "districts.csv")
+        o2 = os.path.join(tmp, "assigned.csv")
+        before2 = listing()
+        code, out, err = run(base + ["--assignment", f_assign, "--out", o1])
+        check(code == 64 and "need --apply" in err and listing() == before2,
+              "--out without --apply is a usage error and writes nothing")
+        code, out, err = run(base + ["--assignment", f_assign, "--out", o1, "--apply"])
+        with open(o1, "rb") as fh:
+            written = fh.read()
+        check(code == 0 and written == (b"district,blocks,total,arealand\n"
+                                        b"1,2,300,3000\n2,4,435,8100\n"),
+              "--apply writes the district table, with LF line ends on every host")
+        check("wrote " in out and o1 in out, "and says what it wrote")
+        code, out, err = run(base + ["--assignment", f_lost, "--out", o1, "--apply"])
+        with open(o1, "rb") as fh:
+            kept = fh.read()
+        check(code == 1 and kept == written and "nothing written" in err,
+              "--apply does NOT overwrite the table when the check refused  "
+              "<-- pinned defect")
+        check("--allow-unreconciled" in err, "and the message names the flag that would override it")
+        code, out, err = run(base + ["--assignment", f_lost, "--out", o1, "--apply",
+                                     "--allow-unreconciled"])
+        with open(o1, "rb") as fh:
+            forced = fh.read()
+        check(code == 1 and forced != written and b"1,2,300,3000\n2,3,80,4100\n" in forced,
+              "--allow-unreconciled writes the short table anyway")
+        check(code == 1, "and still exits 1, because the extract is still wrong  "
+              "<-- pinned defect")
+        code, out, err = run(base + ["--parts", f_parts, "--out", o1, "--assign-out", o2,
+                                     "--apply"])
+        with open(o2, "rb") as fh:
+            assigned = fh.read()
+        check(code == 0 and assigned == (
+            ("geoid,district\n" + "".join("%s,%s\n" % (k, v) for k, v in sorted(
+                [(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "1")]))).encode()),
+            "--assign-out writes the largest-overlap assignment, sorted by GEOID")
+        code, out, err = run(base + ["--parts", f_parts, "--assign-out", o2])
+        check(code == 64, "--assign-out also needs --apply")
+        o5 = os.path.join(tmp, "only-assigned.csv")
+        code, out, err = run(base + ["--parts", f_parts, "--assign-out", o5, "--apply"])
+        check(code == 0 and os.path.exists(o5) and not os.path.exists(o1.replace(
+            "districts", "never-made")) and "districts.csv" not in out,
+              "--assign-out alone writes the assignment and no district table")
+        # the assignment that --assign-out wrote goes back through the check
+        code, out, err = run(base + ["--assignment", o2])
+        check(code == 0, "and the file it wrote reconciles when read back as an assignment")
+
+        # --- usage errors
+        def usage(argv, label):
+            code, out, err = run(argv)
+            check(code == 64 and err.startswith("blockfit: usage:") and out == "", label)
+
+        usage(["--year", "2020", "--county", "99001", "--assignment", f_assign],
+              "a missing --blocks is a usage error")
+        usage(["--blocks", f_blocks, "--county", "99001", "--assignment", f_assign],
+              "a missing --year is a usage error")
+        usage(["--blocks", f_blocks, "--year", "2020", "--assignment", f_assign],
+              "a missing --county is a usage error, with no default county  <-- pinned defect")
+        usage(base, "neither --assignment nor --parts is a usage error")
+        usage(base + ["--assignment", f_assign, "--parts", f_parts],
+              "both --assignment and --parts is a usage error")
+        usage(["--blocks", f_blocks, "--year", "2000", "--county", "99001",
+               "--assignment", f_assign], "--year 2000 is a usage error")
+        usage(["--blocks", f_blocks, "--year", "2020", "--county", "9900",
+               "--assignment", f_assign], "a four digit county is a usage error")
+        usage(["--blocks", f_blocks, "--year", "2020", "--county", "9900\u0661",
+               "--assignment", f_assign], "an Arabic-Indic digit in --county is a usage error")
+        usage(base + ["--assignment", f_assign, "--control-total", "7.5"],
+              "a fractional --control-total is a usage error")
+        usage(base + ["--assignment", f_assign, "--apply"],
+              "--apply with no output path is a usage error")
+        usage(base + ["--assignment", f_assign, "--assign-out", o2, "--apply"],
+              "--assign-out with --assignment is a usage error")
+        usage(base + ["--assignment", f_assign, "--out", f_blocks, "--apply"],
+              "--out equal to --blocks is a usage error, not an overwrite  <-- pinned defect")
+        usage(base + ["--assignment", f_assign, "--out", f_assign, "--apply"],
+              "--out equal to --assignment is a usage error")
+        usage(base + ["--parts", f_parts, "--assign-out", f_parts, "--apply"],
+              "--assign-out equal to --parts is a usage error")
+        usage(base + ["--parts", f_parts, "--out", o1, "--assign-out", o1, "--apply"],
+              "--out and --assign-out equal is a usage error")
+        usage(base + ["--assignment", f_assign, "--out",
+                      os.path.join(tmp, ".", "assign.csv"), "--apply"],
+              "an output that reaches an input through ./ is caught too")
+
+        # --- flags must be spelled out
+        for flag in ("--ap", "--app", "--appl", "--allow", "--allow-unrec", "--assign"):
+            before3 = listing()
+            code, out, err = run(base + ["--assignment", f_assign, "--out", o1, flag])
+            check(code == 2 and listing() == before3 and "unrecognized" in err,
+                  "%s is refused by the parser with exit 2 and writes nothing  "
+                  "<-- pinned defect" % flag)
+        check(_parse(["--apply"]).apply is True and _parse([]).apply is False,
+              "--apply is off by default and on when spelled out")
+        check(_parse([]).allow_unreconciled is False and _parse([]).county is None
+              and _parse([]).measure == "total", "no other flag has a surprising default")
+
+        # --- unreadable inputs and unwritable outputs
+        code, out, err = run(base + ["--assignment", os.path.join(tmp, "missing.csv")])
+        check(code == 2 and "cannot read" in err and out == "",
+              "a missing assignment exits 2 with one line")
+        code, out, err = run(base + ["--assignment", tmp])
+        check(code == 2 and "cannot read" in err, "a directory in place of a file exits 2")
+        code, out, err = run(["--blocks", f_assign, "--year", "2020", "--county", "99001",
+                              "--assignment", f_assign])
+        check(code == 2 and "district table uses" in err,
+              "an assignment file given as the extract exits 2 with the reason")
+        code, out, err = run(base + ["--assignment", f_assign, "--measure", "pop"])
+        check(code == 2 and "no 'pop' column" in err, "a --measure the extract lacks exits 2")
+        code, out, err = run(base[:1] + [put("w.csv", "geoid,total\n%s,x\n" % G1)] + base[2:] +
+                             ["--assignment", f_assign])
+        check(code == 2 and "not a whole number" in err, "a malformed count exits 2")
+        code, out, err = run(base + ["--parts", put("bad.csv", "geoid,district,area\n")])
+        check(code == 1 and "ORPHAN" not in out and "UNASSIGNED" in out,
+              "a parts file with a header and no rows is a refusal, not a crash")
+
+        badpath = os.path.join(tmp, "nodir", "x.csv")
+        code, out, err = run(base + ["--assignment", f_assign, "--out", badpath, "--apply"])
+        check(code == 2 and "cannot write" in err and "RECONCILED" in out,
+              "an unwritable --out exits 2, after the report was printed")
+        code, out, err = run(base + ["--parts", f_parts, "--out", o1,
+                                     "--assign-out", badpath, "--apply"])
+        check(code == 2, "an unwritable --assign-out exits 2")
+
+        class Pipe(object):
+            def __init__(self, fail_write):
+                self.fail_write = fail_write
+
+            def write(self, text):
+                if self.fail_write:
+                    raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                raise OSError(5, "flush failed")
+
+        before4 = listing()
+        o3 = os.path.join(tmp, "never.csv")
+        code, out, err = run(base + ["--assignment", f_assign, "--out", o3, "--apply"],
+                             out=Pipe(True))
+        check(code == 2 and "cannot write the report" in err and listing() == before4,
+              "a closed pipe exits 2 and the CSV is not written  <-- pinned defect")
+        code, out, err = run(base + ["--assignment", f_assign, "--out", o3, "--apply"],
+                             out=Pipe(False))
+        check(code == 2 and listing() == before4, "a report that cannot be flushed exits 2 too")
+        dead = io.StringIO()
+        dead.close()
+        code, out, err = run(base + ["--assignment", f_lost], out=dead)
+        check(code == 2, "a closed stdout object exits 2, not 1, even on a refused run")
+    finally:
+        socket.socket, socket.getaddrinfo, socket.create_connection = saved
+    check(net_calls == [], "the whole command line half made no network call")
+
+    # ---- the real command line, as a separate process
+    secret = "blockfit-canary-7f3a9"
+    env = dict(os.environ)
+    env["BLOCKFIT_TOKEN"] = secret
+    env["PYTHONIOENCODING"] = "ascii"
+    script = os.path.abspath(__file__)
+    o4 = os.path.join(tmp, "proc.csv")
+
+    def proc(argv):
+        done = subprocess.run([sys.executable, script] + argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env, cwd=tmp)
+        return done.returncode, done.stdout.decode("ascii"), done.stderr.decode("ascii")
+
+    pcode, pout, perr = proc(base + ["--assignment", f_assign, "--out", o4, "--apply"])
+    with open(o4, "rb") as fh:
+        pwrote = fh.read()
+    check(pcode == 0 and "RECONCILED" in pout and pwrote == written,
+          "the real command line reconciles and writes the same bytes as the in-process run")
+    pcode, pout, perr = proc(base + ["--assignment", f_lost, "--out", o4, "--apply"])
+    check(pcode == 1 and "REFUSED" in pout, "the real command line exits 1 on a refusal")
+    with open(o4, "rb") as fh:
+        check(fh.read() == pwrote, "and leaves the earlier file alone")
+    before5 = listing()
+    pcode, pout, perr = proc(base + ["--assignment", f_assign, "--out", os.path.join(
+        tmp, "pre.csv"), "--ap"])
+    check(pcode == 2 and listing() == before5 and "unrecognized" in perr,
+          "the real command line refuses --ap with exit 2 and writes nothing  <-- pinned defect")
+    f_accent = put("caf\u00e9.csv", assign_text)
+    pcode, pout, perr = proc(base + ["--assignment", f_accent])
+    check(pcode == 0 and "caf\\xe9.csv" in pout,
+          "a file with an accent in its name reconciles through a strict ASCII stdout  "
+          "<-- pinned defect")
+    pcode, pout, perr = proc(["--blocks", f_blocks])
+    check(pcode == 64, "the real command line exits 64 on a usage error")
+    check(secret not in pout + perr + pwrote.decode("ascii") and
+          secret not in open(o4).read(),
+          "an environment variable named TOKEN is not echoed to stdout, stderr or a file")
+
+    # ---- the standard library only
+    import ast
+    with open(script, "rb") as fh:
+        tree = ast.parse(fh.read())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module.split(".")[0])
+    check(imported == set(["__future__", "argparse", "ast", "contextlib", "csv", "io", "math",
+                           "os", "runpy", "shutil", "socket", "subprocess", "sys", "tempfile"]),
+          "the file imports only the standard library: no arcpy, no third party package")
+
+    # ---- importing the file must not run it
+    import runpy
+    quiet = io.StringIO()
+    with contextlib.redirect_stdout(quiet):
+        namespace = runpy.run_path(script, run_name="blockfit_import")
+    check(quiet.getvalue() == "" and callable(namespace["main"]),
+          "loading the file as a module prints nothing and does not call main")
+
+    # ---- the harness itself, which has to be able to report red
+    def probe():
+        check(False, "a false check must be recorded as a failure")
+        raises(lambda: None, "a function that raises nothing must fail")
+        raises(lambda: 1 / 0, "a function that raises the wrong thing must fail")
+
+    def summary():
+        print("-" * 68)
+        total = passed[0] + len(failed)
+        if failed:
+            print("%d assertions, %d failed" % (total, len(failed)))
+            for label in failed:
+                print("  FAILED: %s" % label)
+            return 1
+        print("%d assertions, 0 failed" % total)
+        return 0
+
+    kept_passed, kept_failed = passed[0], list(failed)
+    noise = io.StringIO()
+    with contextlib.redirect_stdout(noise):
+        probe()
+        probe_code = summary()
+    probe_failed = len(failed) - len(kept_failed)
+    passed[0], failed[:] = kept_passed, kept_failed
+    check(probe_failed == 3 and probe_code == 1,
+          "the harness records a false check, a missing exception and a wrong exception as "
+          "three failures, so a broken tool turns this self-test red  <-- pinned defect")
+
+    shutil.rmtree(tmp, ignore_errors=True)
+    return summary()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
