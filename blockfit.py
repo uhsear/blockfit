@@ -119,8 +119,9 @@ def max_overlap(pieces):
     out of assign, so the reconcile reports it as unassigned. info["split"] maps each block
     that touches more than one district to how many.
 
-    math.fsum is exact on every Python. The built-in sum is only compensated from 3.12, so
-    on 3.9 to 3.11 it could break a tie by rounding, and the two hosts would disagree.
+    math.fsum returns the correctly rounded sum of the exact inputs on every Python. The
+    built-in sum is only compensated from 3.12, so on 3.9 to 3.11 it could break a tie by
+    rounding, and the two hosts would disagree.
     """
     parts = {}
     empty = 0
@@ -197,8 +198,9 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
         reasons.append(
             "VINTAGE: %d extract block(s) (%d %s) are in no district and %d assignment block(s) "
             "are not in the extract; %d of %d assignment blocks match. Census redraws blocks "
-            "every decade, so these files describe different block sets. Rebuild the "
-            "assignment from the %s blocks. Extract only: %s. Assignment only: %s" %
+            "every decade, so these files describe different block sets. Both files must use "
+            "the %s blocks, and blockfit cannot tell which one does not. Extract only: %s. "
+            "Assignment only: %s" %
             (len(unassigned), lost[measure], measure, len(orphans), len(matched),
              len(in_assign), year, sample(unassigned), sample(orphans)))
     elif unassigned:
@@ -485,8 +487,26 @@ def usage_problem(args):
     return None
 
 
+def write_failed(err, what, exc, out, real_stdout):
+    """Say that a write failed and return EXIT_IO.
+
+    After a failed flush Python keeps the unwritten report in the stdout buffer and flushes it
+    again at shutdown. On a closed pipe that second flush fails, and the interpreter replaces
+    our exit code with 120. Pointing the descriptor at os.devnull lets that flush succeed.
+    This is the recipe in the Python documentation for BrokenPipeError.
+    """
+    err.write("blockfit: cannot write%s: %s\n" % (" " + what if what else "", exc))
+    if real_stdout:
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
+        except (OSError, ValueError):   # no usable descriptor, so there is nothing to redirect
+            pass
+    return EXIT_IO
+
+
 def main(argv=None, out=None, err=None):
     args = _parse(argv)
+    real_stdout = out is None
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     if args.self_test:
@@ -526,8 +546,7 @@ def main(argv=None, out=None, err=None):
         out.write(text)
         out.flush()
     except (OSError, ValueError) as exc:
-        err.write("blockfit: cannot write the report: %s\n" % exc)
-        return EXIT_IO
+        return write_failed(err, "the report", exc, out, real_stdout)
     code = EXIT_OK if report["ok"] else EXIT_REFUSED
     if not args.apply:
         return code
@@ -546,8 +565,7 @@ def main(argv=None, out=None, err=None):
             out.write("wrote %s (%d row(s))\n" % (safe(args.assign_out), len(assign)))
         out.flush()
     except (OSError, ValueError) as exc:
-        err.write("blockfit: cannot write: %s\n" % exc)
-        return EXIT_IO
+        return write_failed(err, "", exc, out, real_stdout)
     return code
 
 
@@ -596,7 +614,7 @@ def self_test():
     G1, G2, G3 = g("000100", "1000"), g("000100", "1001"), g("000100", "1002")
     G4, G5, G6 = g("000100", "1003"), g("000100", "1004"), g("000200", "2000")
     BLOCKS = [(G1, 100, 1000), (G2, 200, 2000), (G3, 50, 3000),
-              (G4, 355, 4000), (G5, 0, 500), (G6, 30, 600)]
+              (G4, 350, 4000), (G5, 0, 500), (G6, 30, 600)]
     GOOD = [(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "2")]
     PIECES = [(G1, "1", 1000), (G2, "1", 600), (G2, "2", 400), (G3, "2", 300),
               (G4, "2", 800), (G5, "2", 500), (G5, "1", 0), (G6, "2", 100), (G6, "1", 100)]
@@ -669,19 +687,19 @@ def self_test():
     # ---- reconcile
     ok = rec(GOOD)
     check(ok["ok"] and ok["reasons"] == [], "a complete assignment reconciles")
-    check(ok["assigned_totals"] == ok["extract_totals"] == {"total": 735, "arealand": 11100},
+    check(ok["assigned_totals"] == ok["extract_totals"] == {"total": 730, "arealand": 11100},
           "and the district sums equal the extract on both columns")
     check([d for d, _ in ok["districts"]] == ["1", "2"] and ok["districts"][1][1]["blocks"] == 4,
           "the district table has the right block counts")
 
     centroid = rec([r for r in GOOD if r[0] != G4])
-    check(not centroid["ok"] and centroid["lost"]["total"] == 355,
+    check(not centroid["ok"] and centroid["lost"]["total"] == 350,
           "an assignment missing the block whose centroid fell on water is refused and "
-          "reports the 355 people it lost  <-- pinned defect")
-    check("UNASSIGNED" in text_of(centroid) and "355 total" in text_of(centroid),
+          "reports the 350 people it lost  <-- pinned defect")
+    check("UNASSIGNED" in text_of(centroid) and "350 total" in text_of(centroid),
           "and the reason says so in words")
     check(centroid["assigned_totals"]["total"] == 380,
-          "the district sums add to 380, not the extract's 735, with no error from the "
+          "the district sums add to 380, not the extract's 730, with no error from the "
           "arithmetic  <-- pinned defect")
     empty_block = rec([r for r in GOOD if r[0] != G5])
     check(not empty_block["ok"] and empty_block["lost"]["total"] == 0,
@@ -711,7 +729,7 @@ def self_test():
     con = rec(GOOD + [(G1, "2")])
     check(not con["ok"] and "CONFLICT" in text_of(con),
           "a block given two districts is refused")
-    check(con["assigned_totals"]["total"] == 735,
+    check(con["assigned_totals"]["total"] == 730,
           "and the first district is kept so the sums are not double counted")
 
     tag = rec(GOOD, tags=(10, None))
@@ -722,10 +740,15 @@ def self_test():
           "and so is a GEOID10 assignment")
     check(rec(GOOD, tags=(20, 20))["ok"], "a GEOID20 header on both sides passes for 2020")
 
-    check(rec(GOOD, control=735)["ok"], "an extract equal to the control total passes")
-    ctrl = rec(GOOD, control=736)
+    check(rec(GOOD, control=730)["ok"], "an extract equal to the control total passes")
+    ctrl = rec(GOOD, control=731)
     check(not ctrl["ok"] and "CONTROL" in text_of(ctrl),
           "an extract one person off the control total is refused")
+    ctrl_low = rec(GOOD, control=729)
+    check(not ctrl_low["ok"] and "the extract holds 730 total but the control total is 729"
+          in text_of(ctrl_low),
+          "an extract one person ABOVE the control total is refused too, not only one below  "
+          "<-- pinned defect")
 
     mixed = dict(blocks)
     mixed["98002000100" + "1000"] = {"total": 9, "arealand": 9}
@@ -806,6 +829,9 @@ def self_test():
            "a blank district is refused, not read as district ''", InputError)
     raises(lambda: assignment_of("geoid,district\n%s,D\u00e9\n" % G1),
            "a non-ASCII district is refused", InputError)
+    check(assignment_of("geoid,district\n%s,nan\n%s,01\n%s,1\n" % (G1, G2, G3))[0] ==
+          {G1: "nan", G2: "01", G3: "1"},
+          "documented limit: nan is a district of its own, and 01 and 1 are two districts")
 
     def parts_of(text):
         head, rows = parse(text.encode("utf-8"), "p")
@@ -825,6 +851,8 @@ def self_test():
            "an infinite area is refused", InputError)
     raises(lambda: parts_of("geoid,district,area\n%s,1,-3\n" % G1),
            "a negative area is refused", InputError)
+    check(parts_of("geoid,district,area\n%s,1,1_0\n" % G1)[0] == {G1: "1"},
+          "documented limit: float() reads 1_0 as an area, unlike the strict GEOID and count rules")
 
     # ---- the CSV that pl94 writes is the input, and a leading zero must survive
     PL94_HEAD = ("geoid,arealand,areawatr,total,white,black,aian,asian,nhpi,other,"
@@ -851,6 +879,18 @@ def self_test():
 
     def listing():
         return sorted(os.listdir(tmp))
+
+    def slurp(path):
+        """The bytes of path, or b'' when it is missing, so a broken tool fails a check."""
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return b""
+
+    check(slurp(os.path.join(tmp, "nothing-here")) == b"",
+          "the harness reads a missing file as empty, so a broken tool fails a check and does "
+          "not crash the run")
 
     block_text = "geoid,total,arealand\n" + "".join("%s,%d,%d\n" % row for row in BLOCKS)
     assign_text = "geoid,district\n" + "".join("%s,%s\n" % row for row in GOOD)
@@ -901,21 +941,27 @@ def self_test():
               "a complete assignment exits 0 and prints RECONCILED")
         rows = [line.split() for line in out.splitlines()]
         check(["DISTRICT", "BLOCKS", "total", "arealand"] in rows and
-              ["1", "2", "300", "3000"] in rows and ["2", "4", "435", "8100"] in rows,
+              ["1", "2", "300", "3000"] in rows and ["2", "4", "430", "8100"] in rows,
               "the district table is printed")
-        check("districts 735 / extract 735" in out and "districts 11100 / extract 11100" in out,
+        check("districts 730 / extract 730" in out and "districts 11100 / extract 11100" in out,
               "and the district sum is printed beside the extract sum for every column")
+        check("blocks in the extract       : 6" in out and "blocks in the assignment    : 6" in out
+              and "blocks in both              : 6" in out,
+              "and the three block counts are printed")
         check(listing() == before, "a run without --apply writes nothing at all  <-- pinned defect")
 
         code, out, err = run(base + ["--assignment", f_lost])
-        check(code == 1 and "REFUSED: 1 reason(s)" in out and "355 total" in out,
-              "an assignment that loses the water block exits 1 and names the 355 people")
-        check("districts 380 / extract 735" in out,
+        check(code == 1 and "REFUSED: 1 reason(s)" in out and "350 total" in out,
+              "an assignment that loses the water block exits 1 and names the 350 people")
+        check("districts 380 / extract 730" in out,
               "and prints the short district sum against the extract")
 
         code, out, err = run(base + ["--assignment", f_old])
-        check(code == 1 and "VINTAGE" in out and "Rebuild the assignment from the 2020 blocks" in out,
+        check(code == 1 and "VINTAGE" in out and "Both files must use the 2020 blocks" in out,
               "an assignment on the wrong block set exits 1 and names the vintage")
+        check("blocks in the assignment    : 6" in out and "blocks in both              : 4" in out,
+              "and the blocks in both files are counted as 4, not as every assignment block  "
+              "<-- pinned defect")
 
         code, out, err = run(base + ["--assignment", f_dup])
         check(code == 1 and "REPEATED" in out, "a repeated block exits 1")
@@ -926,10 +972,14 @@ def self_test():
         code, out, err = run(base + ["--assignment", f_tag10])
         check(code == 1 and "VINTAGE: the assignment header says GEOID10 but --year is 2020" in out,
               "and against --year 2020 it is refused  <-- pinned defect")
+        code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
+                              "--assignment", f_assign])
+        check(code == 0 and "2010 blocks" in out,
+              "documented limit: plain geoid headers carry no vintage, so --year 2010 reconciles")
 
-        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "735"])
-        check(code == 0 and "extract 735 / control 735" in out, "a matching control total passes")
-        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "7350"])
+        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "730"])
+        check(code == 0 and "extract 730 / control 730" in out, "a matching control total passes")
+        code, out, err = run(base + ["--assignment", f_assign, "--control-total", "7300"])
         check(code == 1 and "CONTROL" in out, "a wrong control total exits 1")
 
         code, out, err = run(base + ["--parts", f_parts])
@@ -943,7 +993,7 @@ def self_test():
         check(listing() == before, "a --parts run without --apply writes nothing")
         code, out, err = run(base + ["--parts", put("p2.csv", parts_text.replace(
             "%s,2,800\n" % G4, ""))])
-        check(code == 1 and "355 total" in out,
+        check(code == 1 and "350 total" in out,
               "pieces with no part for the water block are refused like a lost block")
 
         # --- writing
@@ -954,31 +1004,27 @@ def self_test():
         check(code == 64 and "need --apply" in err and listing() == before2,
               "--out without --apply is a usage error and writes nothing")
         code, out, err = run(base + ["--assignment", f_assign, "--out", o1, "--apply"])
-        with open(o1, "rb") as fh:
-            written = fh.read()
+        written = slurp(o1)
         check(code == 0 and written == (b"district,blocks,total,arealand\n"
-                                        b"1,2,300,3000\n2,4,435,8100\n"),
+                                        b"1,2,300,3000\n2,4,430,8100\n"),
               "--apply writes the district table, with LF line ends on every host")
         check("wrote " in out and o1 in out, "and says what it wrote")
         code, out, err = run(base + ["--assignment", f_lost, "--out", o1, "--apply"])
-        with open(o1, "rb") as fh:
-            kept = fh.read()
+        kept = slurp(o1)
         check(code == 1 and kept == written and "nothing written" in err,
               "--apply does NOT overwrite the table when the check refused  "
               "<-- pinned defect")
         check("--allow-unreconciled" in err, "and the message names the flag that would override it")
         code, out, err = run(base + ["--assignment", f_lost, "--out", o1, "--apply",
                                      "--allow-unreconciled"])
-        with open(o1, "rb") as fh:
-            forced = fh.read()
+        forced = slurp(o1)
         check(code == 1 and forced != written and b"1,2,300,3000\n2,3,80,4100\n" in forced,
               "--allow-unreconciled writes the short table anyway")
         check(code == 1, "and still exits 1, because the extract is still wrong  "
               "<-- pinned defect")
         code, out, err = run(base + ["--parts", f_parts, "--out", o1, "--assign-out", o2,
                                      "--apply"])
-        with open(o2, "rb") as fh:
-            assigned = fh.read()
+        assigned = slurp(o2)
         check(code == 0 and assigned == (
             ("geoid,district\n" + "".join("%s,%s\n" % (k, v) for k, v in sorted(
                 [(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "1")]))).encode()),
@@ -990,6 +1036,20 @@ def self_test():
         check(code == 0 and os.path.exists(o5) and not os.path.exists(o1.replace(
             "districts", "never-made")) and "districts.csv" not in out,
               "--assign-out alone writes the assignment and no district table")
+        f_sblocks = put("sort-blocks.csv", "geoid,total\n%s,4\n%s,3\n%s,2\n%s,1\n" %
+                        (G4, G3, G2, G1))
+        f_sparts = put("sort-parts.csv",
+                       "geoid,district,area\n%s,A,1\n%s,10,1\n%s,2,1\n%s,1,1\n" % (G4, G3, G2, G1))
+        o6 = os.path.join(tmp, "sorted-districts.csv")
+        o7 = os.path.join(tmp, "sorted-assigned.csv")
+        code, out, err = run(["--blocks", f_sblocks, "--year", "2020", "--county", "99001",
+                              "--parts", f_sparts, "--out", o6, "--assign-out", o7, "--apply"])
+        check(code == 0 and slurp(o6) == b"district,blocks,total\n1,1,1\n2,1,2\n10,1,3\nA,1,4\n",
+              "--out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given "
+              "as A, 10, 2, 1  <-- pinned defect")
+        check(slurp(o7) == ("geoid,district\n%s,1\n%s,2\n%s,10\n%s,A\n" %
+                            (G1, G2, G3, G4)).encode(),
+              "--assign-out sorts by GEOID however the pieces were ordered  <-- pinned defect")
         # the assignment that --assign-out wrote goes back through the check
         code, out, err = run(base + ["--assignment", o2])
         check(code == 0, "and the file it wrote reconciles when read back as an assignment")
@@ -1020,17 +1080,29 @@ def self_test():
               "--apply with no output path is a usage error")
         usage(base + ["--assignment", f_assign, "--assign-out", o2, "--apply"],
               "--assign-out with --assignment is a usage error")
-        usage(base + ["--assignment", f_assign, "--out", f_blocks, "--apply"],
+        usage(["--blocks", f_blocks, "--year", "2020", "--county", "990010",
+               "--assignment", f_assign], "a six digit county is a usage error, not a sub-area "
+              "filter  <-- pinned defect")
+        # These probes run on disposable copies, so a broken guard cannot damage a fixture the
+        # later steps need. It turns the probes red instead of crashing the run.
+        c_blocks = put("victim-blocks.csv", block_text)
+        c_assign = put("victim-assign.csv", assign_text)
+        c_parts = put("victim-parts.csv", parts_text)
+        cbase = ["--blocks", c_blocks, "--year", "2020", "--county", "99001"]
+        usage(cbase + ["--assignment", c_assign, "--out", c_blocks, "--apply"],
               "--out equal to --blocks is a usage error, not an overwrite  <-- pinned defect")
-        usage(base + ["--assignment", f_assign, "--out", f_assign, "--apply"],
+        usage(cbase + ["--assignment", c_assign, "--out", c_assign, "--apply"],
               "--out equal to --assignment is a usage error")
-        usage(base + ["--parts", f_parts, "--assign-out", f_parts, "--apply"],
+        usage(cbase + ["--parts", c_parts, "--assign-out", c_parts, "--apply"],
               "--assign-out equal to --parts is a usage error")
-        usage(base + ["--parts", f_parts, "--out", o1, "--assign-out", o1, "--apply"],
+        usage(cbase + ["--parts", c_parts, "--out", o1, "--assign-out", o1, "--apply"],
               "--out and --assign-out equal is a usage error")
-        usage(base + ["--assignment", f_assign, "--out",
-                      os.path.join(tmp, ".", "assign.csv"), "--apply"],
+        usage(cbase + ["--assignment", c_assign, "--out",
+                       os.path.join(tmp, ".", "victim-assign.csv"), "--apply"],
               "an output that reaches an input through ./ is caught too")
+        check(slurp(c_blocks) == block_text.encode() and slurp(c_assign) == assign_text.encode()
+              and slurp(c_parts) == parts_text.encode(),
+              "and none of those probes touched its input")
 
         # --- flags must be spelled out
         for flag in ("--ap", "--app", "--appl", "--allow", "--allow-unrec", "--assign"):
@@ -1113,14 +1185,12 @@ def self_test():
         return done.returncode, done.stdout.decode("ascii"), done.stderr.decode("ascii")
 
     pcode, pout, perr = proc(base + ["--assignment", f_assign, "--out", o4, "--apply"])
-    with open(o4, "rb") as fh:
-        pwrote = fh.read()
+    pwrote = slurp(o4)
     check(pcode == 0 and "RECONCILED" in pout and pwrote == written,
           "the real command line reconciles and writes the same bytes as the in-process run")
     pcode, pout, perr = proc(base + ["--assignment", f_lost, "--out", o4, "--apply"])
     check(pcode == 1 and "REFUSED" in pout, "the real command line exits 1 on a refusal")
-    with open(o4, "rb") as fh:
-        check(fh.read() == pwrote, "and leaves the earlier file alone")
+    check(slurp(o4) == pwrote, "and leaves the earlier file alone")
     before5 = listing()
     pcode, pout, perr = proc(base + ["--assignment", f_assign, "--out", os.path.join(
         tmp, "pre.csv"), "--ap"])
@@ -1133,9 +1203,51 @@ def self_test():
           "<-- pinned defect")
     pcode, pout, perr = proc(["--blocks", f_blocks])
     check(pcode == 64, "the real command line exits 64 on a usage error")
-    check(secret not in pout + perr + pwrote.decode("ascii") and
-          secret not in open(o4).read(),
+    check(secret not in pout + perr and secret.encode() not in pwrote + slurp(o4),
           "an environment variable named TOKEN is not echoed to stdout, stderr or a file")
+
+    # ---- a closed pipe, for real. Python flushes stdout again at shutdown and fails a second
+    # time, and then the interpreter exits 120. The fake Pipe above cannot show that.
+    rd, wr = os.pipe()
+    os.close(rd)
+    o8 = os.path.join(tmp, "pipe-never.csv")
+    before6 = listing()
+    done = subprocess.run([sys.executable, script] + base + ["--assignment", f_assign, "--out", o8,
+                                                              "--apply"],
+                          stdout=wr, stderr=subprocess.PIPE, env=env, cwd=tmp)
+    os.close(wr)
+    check(done.returncode == 2 and b"cannot write the report" in done.stderr
+          and listing() == before6,
+          "a real closed pipe exits 2, not the interpreter's 120, and writes no file  "
+          "<-- pinned defect")
+
+    class Gone(object):
+        """A stdout whose pipe is closed. fd is the descriptor it reports, or None for none."""
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def write(self, text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def fileno(self):
+            if self.fd is None:
+                raise OSError(9, "no descriptor")
+            return self.fd
+
+    o9 = os.path.join(tmp, "fd.bin")
+    fd = os.open(o9, os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0))
+    sink = io.StringIO()
+    with contextlib.redirect_stdout(Gone(fd)):
+        gone_code = main(base + ["--assignment", f_assign], None, sink)
+    os.write(fd, b"leak")
+    os.close(fd)
+    check(gone_code == 2 and slurp(o9) == b"" and "cannot write the report" in sink.getvalue(),
+          "after a failed report write the stdout descriptor points at the null device, so the "
+          "flush at shutdown cannot fail  <-- pinned defect")
+    with contextlib.redirect_stdout(Gone(None)):
+        gone_code = main(base + ["--assignment", f_assign], None, sink)
+    check(gone_code == 2, "a stdout with no descriptor still exits 2")
 
     # ---- the standard library only
     import ast

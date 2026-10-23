@@ -10,7 +10,7 @@ outside the district tiling. That block is in no district. Its people are in no 
 
 The district table still prints. Each district has a believable number. The five numbers add up to a
 little less than the county total, and nothing in the job complains. In the fixture below the short
-table is 380 against 735. In a real county the gap can be a fraction of a percent, which is small
+table is 380 against 730. In a real county the gap can be a fraction of a percent, which is small
 enough to survive a review and large enough to be wrong.
 
 The same job can fail a second way. Census redraws its blocks every decade. A district file made
@@ -34,11 +34,11 @@ blockfit: blocks.csv with assignment centroid.csv
   1                2          300         3000
   2                3           80         4100
 
-  total          districts 380 / extract 735
+  total          districts 380 / extract 730
   arealand       districts 7100 / extract 11100
 
 REFUSED: 1 reason(s)
-  1. UNASSIGNED: 1 extract block(s) are in no district, holding 355 total: 990010001001003
+  1. UNASSIGNED: 1 extract block(s) are in no district, holding 350 total: 990010001001003
 ```
 
 The exit code is 1. County `99001` does not exist. Every number in this file comes from a synthetic
@@ -66,9 +66,9 @@ $ python blockfit.py --self-test
 blockfit self-test: no network, no census download, no arcpy
 --------------------------------------------------------------------
 ...
-PASS  an assignment missing the block whose centroid fell on water is refused and reports the 355 people it lost  <-- pinned defect
+PASS  an assignment missing the block whose centroid fell on water is refused and reports the 350 people it lost  <-- pinned defect
 ...
-PASS  the district sums add to 380, not the extract's 735, with no error from the arithmetic  <-- pinned defect
+PASS  the district sums add to 380, not the extract's 730, with no error from the arithmetic  <-- pinned defect
 ...
 PASS  a block with no people missing from the assignment is refused although the people still add up  <-- pinned defect
 ...
@@ -88,6 +88,12 @@ PASS  --ap is refused by the parser with exit 2 and writes nothing  <-- pinned d
 ...
 PASS  a closed pipe exits 2 and the CSV is not written  <-- pinned defect
 ...
+PASS  a real closed pipe exits 2, not the interpreter's 120, and writes no file  <-- pinned defect
+...
+PASS  --out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given as A, 10, 2, 1  <-- pinned defect
+...
+PASS  an extract one person ABOVE the control total is refused too, not only one below  <-- pinned defect
+...
 PASS  the whole command line half made no network call
 ...
 PASS  the file imports only the standard library: no arcpy, no third party package
@@ -95,14 +101,14 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-157 assertions, 0 failed
+171 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 157 assertions pass
+The block is abridged. `...` marks each place where lines are left out. The same 171 assertions pass
 on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
-Ubuntu with Python 3.12. The full output on
+Ubuntu with Python 3.12. I did not run Python 3.11. The full output on
 Windows and the full output on Ubuntu are byte for byte identical apart from line ends.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (730 statements, 164 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (786 statements, 168 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -171,8 +177,8 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
 1. **Every block is in a district.** A block in the extract and not in the assignment is
    `UNASSIGNED`. The reason gives the number of blocks, the people in them and example GEOIDs.
    The count is by block, not only by people. A block with no residents moves no population total,
-   so a population sum alone cannot see it leave. blockfit reports the block and the land area that
-   went with it.
+   so a population sum alone cannot see it leave. The reason names the block count and the
+   `--measure` total only. The loss in every other count column shows in the sums table.
 2. **The two files describe one block set.** When some extract blocks are missing from the
    assignment and some assignment blocks are missing from the extract, the reason is `VINTAGE`. It
    says how many assignment blocks do match. A block in the assignment only is an `ORPHAN` when
@@ -187,15 +193,22 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
 6. **The control total.** With `--control-total`, the extract's `--measure` must equal it.
 7. **Not empty.** An extract with no rows is `EMPTY`. Zero equals zero is not a reconciliation.
 
-The district sums are printed beside the extract sums for every count column. They are equal exactly
-when all of the above pass.
+The district sums are printed beside the extract sums for every count column. They are equal when
+no block is lost, so equal sums are needed for `RECONCILED`. They are not enough. A repeated block,
+a conflict, a control total mismatch, an empty extract and an out-of-county block all print equal
+sums and are still refused.
+The reasons, and the last line, are the verdict. The sums line is not.
 
-The inputs are read strictly. These are errors with exit 2, and they name the line: a GEOID that is
+The inputs are read strictly. These are errors with exit 2: a GEOID that is
 not 15 ASCII digits (a 14 digit one gets a message about a lost leading zero), a count that is not a
 whole number, a block twice in the extract, a short or long row, a repeated column name, a district
 that is empty or not printable ASCII, an area that is not a finite number of 0 or more, a NUL byte,
-and a file that is not UTF-8. A leading zero in a state FIPS survives, because GEOIDs are read as
+and a file that is not UTF-8. Most name the line. A repeated column name, a NUL byte and a file that
+is not UTF-8 name only the file. A leading zero in a state FIPS survives, because GEOIDs are read as
 text.
+
+Every column in the extract except the GEOID must be a whole number. A text column, such as a NAME
+column in a Census download, ends the run with exit 2 and `not a whole number`. Remove it first.
 
 ## `--parts`: largest overlap
 
@@ -206,9 +219,10 @@ in the same district are added. The block goes to the district with the largest 
   goes to `2`. The tie count is printed.
 - A piece with an area of 0 is ignored and counted. A block with no positive piece is left out of
   the assignment, so the reconciliation reports it as unassigned.
-- The areas are added with `math.fsum`, which is exact. A running float sum depends on the order of
-  the rows, and the built-in `sum` is only compensated from Python 3.12. The self-test pins a case
-  where order decides the tie.
+- The areas are added with `math.fsum`, which returns the correctly rounded sum of the exact inputs.
+  A running float sum depends on the order of the rows, and the built-in `sum` is only compensated
+  from Python 3.12. The self-test pins a case where order decides the tie. That pin catches a switch
+  to `sum` on Python 3.9 to 3.11 only. On 3.12 and later `sum` gives the same answer.
 - The report counts blocks that touch more than one district and the people in them. The rule puts
   each whole block in one district, so that number is an upper bound on the people it can place in
   the wrong one.
@@ -218,9 +232,9 @@ $ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county
 ...
   DISTRICT    BLOCKS        total     arealand
   1                3          330         3600
-  2                3          405         7500
+  2                3          400         7500
 
-  total          districts 735 / extract 735
+  total          districts 730 / extract 730
   arealand       districts 11100 / extract 11100
 
   blocks split across districts: 2, holding 230 total (whole blocks, so this bounds the people the largest-overlap rule can misplace)
@@ -230,7 +244,7 @@ $ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county
 RECONCILED: every block is in exactly one district and the district sums equal the extract.
 ```
 
-The block with 355 people in water is in the pieces file here, with a part of its own, so the same
+The block with 350 people in water is in the pieces file here, with a part of its own, so the same
 fixture that failed under the centroid rule reconciles.
 
 ## A vintage mismatch
@@ -239,11 +253,13 @@ fixture that failed under the centroid rule reconciles.
 $ python blockfit.py --blocks blocks.csv --assignment old.csv --year 2020 --county 99001
 ...
 REFUSED: 1 reason(s)
-  1. VINTAGE: 2 extract block(s) (355 total) are in no district and 2 assignment block(s) are not in the extract; 4 of 6 assignment blocks match. Census redraws blocks every decade, so these files describe different block sets. Rebuild the assignment from the 2020 blocks. Extract only: 990010001001003, 990010001001004. Assignment only: 990010001009100, 990010001009200
+  1. VINTAGE: 2 extract block(s) (350 total) are in no district and 2 assignment block(s) are not in the extract; 4 of 6 assignment blocks match. Census redraws blocks every decade, so these files describe different block sets. Both files must use the 2020 blocks, and blockfit cannot tell which one does not. Extract only: 990010001001003, 990010001001004. Assignment only: 990010001009100, 990010001009200
 ```
 
 The reason says the files disagree about which blocks exist. blockfit cannot tell you which file
-is on the wrong vintage. It can tell you the two are not on the same one.
+is on the wrong vintage. It can tell you the two are not on the same one. Any run with blocks on
+both sides that the other side lacks gets this wording, so one mistyped GEOID in each file gets it
+too.
 
 ## Producing the inputs
 
@@ -288,13 +304,16 @@ same inputs produce the same bytes.
 ```
 district,blocks,total,arealand
 1,2,300,3000
-2,4,435,8100
+2,4,430,8100
 ```
 
 When the check refused, `--apply` writes nothing and says so. `--allow-unreconciled` writes the
 short table anyway and the run still exits 1. A job that overrides the refusal cannot also report
 success. The report is flushed before any file is written. If stdout is a closed pipe the run exits
-2 and writes no file.
+2 and writes no file. On a closed pipe Python would flush its stdout buffer a second time at
+shutdown, fail again, and exit 120. blockfit points its stdout descriptor at the null device first
+so that the exit code stays 2. The self-test runs this against a real closed pipe in a child
+process, and checks the descriptor redirect in process.
 
 The file written by `--assign-out` goes back through the check as `--assignment`. The self-test
 does that and it reconciles.
@@ -320,8 +339,9 @@ if sum(totals.values()) != county_total:
 write_table(totals)
 ```
 
-The table is still written, still loaded into a map, and the warning scrolls off. blockfit writes
-nothing when it refuses, and `--allow-unreconciled` still exits 1.
+The table is still written, still loaded into a map, and the warning scrolls off. With `--apply`,
+blockfit writes nothing when it refuses. `--allow-unreconciled` writes the short table on purpose,
+and the run still exits 1.
 
 Comparing only population hides a second loss. Under a centroid rule, the blocks that fall out are
 often the empty ones: water, and a highway median. They move no population total. The self-test
@@ -349,6 +369,49 @@ and not only people.
   One person off is a refusal.
 - **One count column means people.** `--measure` names it. The other columns are summed and printed,
   and reconciled by the same argument, but only `--measure` goes into the reasons and the control.
+- **Vintage is a tag and a difference.** `--year` matters only when a header carries a `GEOID10`
+  or `GEOID20` tag, or when the two block sets differ. Two files with a plain `geoid` header on the
+  wrong decade and identical block sets reconcile. A wrong `--year` given with consistent files
+  reconciles. `--year` is a claim that blockfit cannot verify. pl94 writes a plain `geoid` header
+  for both vintages, so the report still prints the `--year` you gave.
+- **The control total is trusted.** `--control-total` checks the extract against the number. It
+  cannot check the number. A wrong control gives a wrong verdict.
+- **District labels are text.** A label is compared as text after trimming. `1` and `01` are two
+  districts. A missing value written as `nan`, `None`, `0` or `NULL` is a district of its own. Such
+  an assignment reconciles with exit 0 and a phantom row in the table, so read the district table.
+  blockfit does not know which labels are valid. A label that starts with `=`, `+`, `-` or `@` is
+  written as it is, so a spreadsheet may read it as a formula.
+- **Areas are trusted.** `--parts` areas are not checked for units or projection. A mixed set gives
+  a wrong largest part and no warning. Duplicate piece rows (the same GEOID, district and area)
+  are summed as separate pieces and are not detected, so they can change which district wins. The
+  areas are read with `float()`, which also accepts `1_0` and non-ASCII digits. GEOIDs and counts
+  are stricter and take ASCII digits only.
+- **Large numbers.** Recent Python releases cap `int()` at 4300 digits (3.11 and later, and the
+  security releases of 3.9 and 3.10; I saw it on 3.13 and 3.9.25). A count cell or
+  `--control-total` of more than 4300 digits ends in a traceback with exit 1, and exit 1 means
+  "refused" to a scheduler. Do not feed the tool numbers longer than 4300 digits. Pieces of one
+  block that sum past about 1.8e308 in area make `math.fsum` raise `OverflowError`, with the same
+  result.
+- **A traceback is a crash.** Any uncaught exception exits 1, the same code as a data refusal. The
+  only reachable ones found are the two above, and a missing `sys.stdout` (Python started with
+  stdout closed, or `pythonw`), which raises `AttributeError` and exits 1 instead of 2. Treat a
+  traceback as a crash even though the exit code is 1.
+- **Outputs are not atomic.** `--out` and `--assign-out` are opened for writing in place, not
+  written to a temporary file and renamed. A full disk part way through leaves a truncated table,
+  and the run exits 2. With both flags, a failure on the second leaves the first file written. The
+  exit code is 2.
+- **The input check is by path.** The test that an output is an input uses `realpath` and
+  `normcase`. It does not follow hard links, NTFS alternate data streams or 8.3 short names. It is
+  case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
+  point `--out` at a hard link of an input.
+- **Mutants the self-test cannot tell apart.** Two mutants of the source are equivalent. The
+  `sample()` boundary (exactly 5 items prints without "first 5 of 5") has no observable
+  difference that the tests could pin, and the second `if not args.apply: return code` guard is
+  redundant behind `usage_problem`. Replacing `math.fsum` with `sum` is caught on Python 3.11 and
+  earlier only. On 3.12 and 3.13 the built-in `sum` is compensated, so the Python 3.9 and 3.10
+  runs are the ones that catch it.
+- **The self-test cleans up on success only.** A crash part way through leaves a `blockfit-*`
+  folder in the system temporary directory.
 - **Not run elsewhere.** Windows with Python 3.9 to 3.13, and Ubuntu with Python 3.12. Not macOS.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
@@ -364,10 +427,10 @@ Read on 2026-10-22.
   are "numbered uniquely with a four-digit census block number from 0000 to 9999 within census
   tract", and the first digit is the block group.
 - Census Bureau, "Data Gem: Can I Compare 2020 Census and 2010 Census Redistricting Data?"
-  transcript (`www2.census.gov/about/training-workshops/data-gems/2021/`): "every decade the Census
-  Bureau redesigns the boundaries of blocks. Therefore, a direct block comparison is not advised."
-  Its example is a 2010 pair of blocks that became one 2020 block, with a sliver of a third moved
-  to another.
+  (`census.gov/data/academy/data-gems/2021/compare-2020-census-and-2010-census-redistricting-data.html`):
+  most blocks, tracts and block groups were redrawn between the two censuses, so a direct block
+  comparison across decades is not advised. This is my paraphrase. I did not re-confirm the exact
+  wording of the transcript on 2026-10-23, so it is not in quotation marks.
 - Census Bureau, relationship files page (`census.gov/geographies/reference-files/time-series/geo/relationship-files.2020.html`):
   the block relationship files compare the universe of 2010 tabulation blocks to the universe of
   2020 tabulation blocks.
@@ -386,10 +449,11 @@ none of them.
   decides the extract is right, and blockfit decides the districts account for all of it.
 - [maup](https://github.com/mggg/maup) assigns blocks, precincts and districts to each other from
   real geometry. Use it to make an assignment. Use blockfit to check one.
-- Other repositories are called `blockfit`. A search of GitHub on 2026-10-22, limited to ten
-  results, returned ten. The ones with a real description were a shape-packing optimiser, a heap
-  allocator and two hackathon projects. None is about Census blocks as far as the descriptions say.
-  The rest had no description or a placeholder, and I did not open them.
+- Other repositories are called `blockfit` or close to it. `gh search repos blockfit --limit 10`
+  on 2026-10-23 returned ten, including this one. The ones with a real description were a
+  genetic-algorithm shape-packing program (`BlockFitter`) and two hackathon projects from 2018.
+  None is about Census blocks as far as the descriptions say. The rest had no description or a
+  placeholder, and I did not open them. A later search may list different repositories.
 
 ## Contributing
 
