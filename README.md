@@ -25,6 +25,7 @@ one district, both files name the same blocks, and the district sums equal the e
 $ python blockfit.py --blocks blocks.csv --assignment centroid.csv --year 2020 --county 99001
 blockfit: blocks.csv with assignment centroid.csv
   county 99001, 2020 blocks, count column 'total'
+  vintage: not verified. Neither header carries a GEOID10 or GEOID20 tag, so 2020 is your claim, not a finding.
 
   blocks in the extract       : 6
   blocks in the assignment    : 5
@@ -55,9 +56,11 @@ maup applies it to real geometry with spatial indexes, which blockfit does not d
 geometry and a Python environment with geopandas, use maup to make the assignment.
 
 What blockfit adds is the refusal after the assignment. maup's README shows how to count unassigned
-blocks by hand. It does not describe a check that the district sums equal a control total, a check
+blocks, and how to compare the summed block totals with the summed target totals to see the loss,
+by hand and by printing the two sums. That comparison is the one blockfit makes, as a refusal with an
+exit code. maup's README does not describe a check that the sums equal a control total, a check
 that the assignment and the extract hold the same blocks, or a check of block vintage. blockfit
-does those three and nothing else. Read on 2026-10-22; maup may have changed since.
+makes those checks and nothing else. Read on 2026-10-24; maup may have changed since.
 
 ## Self-test
 
@@ -80,6 +83,10 @@ PASS  an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defe
 ...
 PASS  a run without --apply writes nothing at all  <-- pinned defect
 ...
+PASS  and the report says the vintage was not verified  <-- pinned defect
+...
+PASS  a district label of 5000 digits reconciles and does not end in a traceback  <-- pinned defect
+...
 PASS  --apply does NOT overwrite the table when the check refused  <-- pinned defect
 ...
 PASS  and still exits 1, because the extract is still wrong  <-- pinned defect
@@ -101,14 +108,14 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-171 assertions, 0 failed
+176 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 171 assertions pass
+The block is abridged. `...` marks each place where lines are left out. The same 176 assertions pass
 on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
 Ubuntu with Python 3.12. I did not run Python 3.11. The full output on
 Windows and the full output on Ubuntu are byte for byte identical apart from line ends.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (786 statements, 168 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (800 statements, 170 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -156,7 +163,7 @@ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 9
 | `--control-total` | off | The extract's `--measure` must equal this whole number. |
 | `--out` | none | Path for the district summary CSV. Needs `--apply`. |
 | `--assign-out` | none | Path for the block-to-district CSV that `--parts` produced. Needs `--apply`. |
-| `--apply` | off | Write `--out` and `--assign-out`. Without it nothing is written. |
+| `--apply` | off | Write `--out` and `--assign-out`. Without it blockfit writes no file. `--self-test` is the one exception (see Output). |
 | `--allow-unreconciled` | off | Write the outputs even when the check refused. The exit code stays 1. |
 | `--self-test` | off | Run the offline assertions and exit. |
 
@@ -265,7 +272,7 @@ too.
 
 The extract is a CSV with a GEOID column and count columns. The CSV that
 [pl94](https://github.com/uhsear/pl94) writes fits: its 15 columns load, 14 of them as counts, and
-the self-test loads a synthetic CSV with that header. blockfit does not read the PL 94-171 zip. The
+the self-test loads a synthetic CSV with that header. blockfit does not read the PL 94-176 zip. The
 extract carries the people. It does not carry a second copy of the county total, which is why
 `--control-total` exists. Take the control from the county record in the same PL file, which pl94
 already reconciles to the extract.
@@ -277,8 +284,8 @@ the inputs to it. That is the shape `--parts` needs. Export the block GEOID, the
 polygon area. I have not run an Intersect for this release. The `SHAPE@AREA` token is documented as
 "a double of the feature's area" and the page does not say the units. blockfit compares areas as
 plain numbers and cannot know their unit. Take every area from one projection. maup's README warns
-that area-based functions behave badly in geographic coordinates, and an equal-area projection is
-the safe choice. blockfit does not check any of this.
+that "many of maup's functions behave badly in geographic projections", and an equal-area
+projection is the safe choice. blockfit does not check any of this.
 
 ## Exit codes
 
@@ -294,8 +301,11 @@ which is a fact about the data. A file that could not be written is a fact about
 
 ## Output
 
-Nothing is written unless `--apply` is given. The self-test lists the directory before and after a
-run without it, and asserts that the listing is unchanged.
+Without `--apply`, a normal run writes no file. The self-test lists the directory before and after
+a run without it, and asserts that the listing is unchanged. `--self-test` is the one exception:
+it writes about two dozen fixture files into a new folder in the system temporary directory, runs
+against them, and deletes the folder when it passes. It never writes beside the inputs or in the
+current directory.
 
 `--out` writes one row per district, sorted with whole numbers first, then text. `--assign-out`
 writes `geoid,district`, sorted by GEOID. Both use LF line ends on every host, so two runs on the
@@ -373,7 +383,9 @@ and not only people.
   or `GEOID20` tag, or when the two block sets differ. Two files with a plain `geoid` header on the
   wrong decade and identical block sets reconcile. A wrong `--year` given with consistent files
   reconciles. `--year` is a claim that blockfit cannot verify. pl94 writes a plain `geoid` header
-  for both vintages, so the report still prints the `--year` you gave.
+  for both vintages. When neither file carries a tag, the report says "vintage: not verified" and
+  that the year is your claim, and the exit code stays 0. One tagged file is enough to drop that
+  line, and the tag is then checked on that file only.
 - **The control total is trusted.** `--control-total` checks the extract against the number. It
   cannot check the number. A wrong control gives a wrong verdict.
 - **District labels are text.** A label is compared as text after trimming. `1` and `01` are two
@@ -391,7 +403,8 @@ and not only people.
   `--control-total` of more than 4300 digits ends in a traceback with exit 1, and exit 1 means
   "refused" to a scheduler. Do not feed the tool numbers longer than 4300 digits. Pieces of one
   block that sum past about 1.8e308 in area make `math.fsum` raise `OverflowError`, with the same
-  result.
+  result. A district label of any length is fine, because labels are sorted without `int()`; the
+  self-test pins a label of 5000 digits.
 - **A traceback is a crash.** Any uncaught exception exits 1, the same code as a data refusal. The
   only reachable ones found are the two above, and a missing `sys.stdout` (Python started with
   stdout closed, or `pythonw`), which raises `AttributeError` and exits 1 instead of 2. Treat a
@@ -404,15 +417,36 @@ and not only people.
   `normcase`. It does not follow hard links, NTFS alternate data streams or 8.3 short names. It is
   case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
   point `--out` at a hard link of an input.
-- **Mutants the self-test cannot tell apart.** Two mutants of the source are equivalent. The
-  `sample()` boundary (exactly 5 items prints without "first 5 of 5") has no observable
-  difference that the tests could pin, and the second `if not args.apply: return code` guard is
-  redundant behind `usage_problem`. Replacing `math.fsum` with `sum` is caught on Python 3.11 and
-  earlier only. On 3.12 and 3.13 the built-in `sum` is compensated, so the Python 3.9 and 3.10
-  runs are the ones that catch it.
+- **Mutants the self-test cannot tell apart.** I ran a mutation sweep of the code above
+  `self_test()` on an earlier build, before the vintage line and the `district_key` change. Two
+  surviving mutants are equivalent. A further dozen or so are cosmetic or sit on a boundary that
+  the self-test does not pin. None of them could change a verdict or a write, and the decision core
+  had no other survivor. I did not repeat the sweep after those two changes. The two equivalent
+  mutants are the `sample()` boundary (exactly 5 items prints without "first 5 of 5"), which has no
+  observable difference that a test could pin, and the second `if not args.apply: return code`
+  guard, which is redundant behind `usage_problem`. The unpinned ones: the self-test does not pin
+  the report's blank separator lines, the numbering of reasons (it starts at 1), the extract label
+  in the header line, the assignment or parts word in the header line, the closing flush, or the
+  `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
+  labels (the tilde) is not pinned by the self-test. Replacing `math.fsum` with `sum` is caught on
+  Python 3.11 and earlier only. On 3.12 and 3.13 the built-in `sum` is compensated, so the Python
+  3.9 and 3.10 runs are the ones that catch it.
+- **Blank and odd lines.** A trailing line of spaces or commas is a malformed row and ends the run
+  with exit 2, not a skipped blank line. Only comma separated files are read; a semicolon or tab
+  file exits 2 with a missing-GEOID-column message that does not name the delimiter. A blank
+  district cell, as a spatial join writes for a block outside the district tiling, is exit 2, not
+  an `UNASSIGNED` refusal with exit 1.
+- **The output path is not checked for type.** A device name such as `NUL` or `/dev/null` is
+  reported as written, and nothing is stored. File names are echoed with non-ASCII escaped but
+  ASCII control characters left as they are.
+- **Float noise is not a tie.** Areas that are equal in exact arithmetic but differ by binary float
+  noise in the file (0.30000000000000004 against 0.3) are not reported as ties.
+- **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
+  header as a good one. Only the exit code and the report on stdout say that it is short.
 - **The self-test cleans up on success only.** A crash part way through leaves a `blockfit-*`
   folder in the system temporary directory.
-- **Not run elsewhere.** Windows with Python 3.9 to 3.13, and Ubuntu with Python 3.12. Not macOS.
+- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.12 and 3.13, and Ubuntu with Python 3.12.
+  Not Python 3.11. Not macOS.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
@@ -444,14 +478,15 @@ none of them.
 
 ## Related
 
-- [pl94](https://github.com/uhsear/pl94) reads the PL 94-171 bulk file and refuses a block extract
+- [pl94](https://github.com/uhsear/pl94) reads the PL 94-176 bulk file and refuses a block extract
   that does not reconcile to the county record in the same file. blockfit is its companion: pl94
   decides the extract is right, and blockfit decides the districts account for all of it.
 - [maup](https://github.com/mggg/maup) assigns blocks, precincts and districts to each other from
   real geometry. Use it to make an assignment. Use blockfit to check one.
 - Other repositories are called `blockfit` or close to it. `gh search repos blockfit --limit 10`
-  on 2026-10-23 returned ten, including this one. The ones with a real description were a
-  genetic-algorithm shape-packing program (`BlockFitter`) and two hackathon projects from 2018.
+  on 2026-10-24 returned ten, and this repository was not among them; it appears at `--limit 30`.
+  The ones with a real description were a genetic-algorithm shape-packing program (`BlockFitter`),
+  a hackathon project from 2018 and its demo, and a minimal heap allocator in C (`kundurz/blockfit`).
   None is about Census blocks as far as the descriptions say. The rest had no description or a
   placeholder, and I did not open them. A later search may list different repositories.
 

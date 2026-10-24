@@ -87,8 +87,10 @@ def normalise_geoid(text):
 def district_key(district):
     """Sort whole numbers as numbers, then everything else as text."""
     if is_digits(district):
-        return (0, int(district), district)
-    return (1, 0, district)
+        # Compare digit strings by length, then text: the order int() gives, with no 4300 digit cap.
+        digits = district.lstrip("0")
+        return (0, len(digits), digits, district)
+    return (1, 0, "", district)
 
 
 def collect_assignment(rows):
@@ -231,6 +233,7 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
     assigned_totals = dict((col, sum(row[col] for row in districts.values())) for col in columns)
     return {
         "ok": not reasons,
+        "vintage_verified": any(tag is not None for tag in tags),
         "reasons": reasons,
         "districts": sorted(districts.items(), key=lambda kv: district_key(kv[0])),
         "columns": list(columns),
@@ -250,12 +253,15 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
 def render(report, names, year, county, parts_info=None):
     """The text report. names is (extract label, assignment label, 'assignment' or 'parts')."""
     lines = ["blockfit: %s with %s %s" % (safe(names[0]), names[2], safe(names[1])),
-             "  county %s, %s blocks, count column '%s'" % (county, year, report["measure"]),
-             "",
-             "  blocks in the extract       : %d" % report["extract_blocks"],
-             "  blocks in the assignment    : %d" % report["assign_blocks"],
-             "  blocks in both              : %d" % report["matched"],
-             ""]
+             "  county %s, %s blocks, count column '%s'" % (county, year, report["measure"])]
+    if not report["vintage_verified"]:
+        lines.append("  vintage: not verified. Neither header carries a GEOID10 or GEOID20 tag, "
+                     "so %s is your claim, not a finding." % year)
+    lines += ["",
+              "  blocks in the extract       : %d" % report["extract_blocks"],
+              "  blocks in the assignment    : %d" % report["assign_blocks"],
+              "  blocks in both              : %d" % report["matched"],
+              ""]
     columns = report["columns"]
     lines.append("  %-10s %7s %s" % ("DISTRICT", "BLOCKS", " ".join("%12s" % c for c in columns)))
     for district, row in report["districts"]:
@@ -651,6 +657,10 @@ def self_test():
           and not is_printable_ascii("a\tb"), "printable ASCII excludes tabs and accents")
     check(sorted(["10", "2", "B", "1", "A"], key=district_key) == ["1", "2", "10", "A", "B"],
           "districts sort 1, 2, 10 then text, not 1, 10, 2")
+    check(sorted(["9" * 5000, "2" * 5000, "007", "7", "A"], key=district_key)
+          == ["007", "7", "2" * 5000, "9" * 5000, "A"],
+          "a district label of more than 4300 digits sorts without a traceback  "
+          "<-- pinned defect")
     check(sample(["a", "b"]) == "a, b" and "first 5 of 7" in sample(list("abcdefg")),
           "sample shows five and says how many there are")
 
@@ -904,6 +914,8 @@ def self_test():
         for l in assign_text.splitlines(True)))
     f_dup = put("dup.csv", assign_text + "%s,1\n%s,1\n" % (G1, G3))
     f_tag10 = put("tag10.csv", assign_text.replace("geoid", "geoid10", 1))
+    f_bigdist = put("bigdist.csv", assign_text.replace(",1\n", ",%s\n" % ("7" * 5000)))
+    f_tag20 = put("tag20.csv", assign_text.replace("geoid", "geoid20", 1))
     before = listing()
 
     def run(argv, out=None):
@@ -976,6 +988,15 @@ def self_test():
                               "--assignment", f_assign])
         check(code == 0 and "2010 blocks" in out,
               "documented limit: plain geoid headers carry no vintage, so --year 2010 reconciles")
+        check("vintage: not verified" in out and "2010 is your claim, not a finding" in out,
+              "and the report says the vintage was not verified  <-- pinned defect")
+        code, out, err = run(base + ["--assignment", f_tag20])
+        check(code == 0 and "vintage: not verified" not in out,
+              "one header tag is enough to call the vintage checked")
+        code, out, err = run(base + ["--assignment", f_bigdist])
+        check(code == 0 and "RECONCILED" in out,
+              "a district label of 5000 digits reconciles and does not end in a traceback  "
+              "<-- pinned defect")
 
         code, out, err = run(base + ["--assignment", f_assign, "--control-total", "730"])
         check(code == 0 and "extract 730 / control 730" in out, "a matching control total passes")
@@ -1128,6 +1149,10 @@ def self_test():
               "an assignment file given as the extract exits 2 with the reason")
         code, out, err = run(base + ["--assignment", f_assign, "--measure", "pop"])
         check(code == 2 and "no 'pop' column" in err, "a --measure the extract lacks exits 2")
+        code, out, err = run(base + ["--assignment", f_assign, "--measure", "arealand",
+                                     "--control-total", "11100"])
+        check(code == 0 and "arealand       extract 11100 / control 11100" in out,
+              "a --measure naming another count column reconciles and checks the control on it")
         code, out, err = run(base[:1] + [put("w.csv", "geoid,total\n%s,x\n" % G1)] + base[2:] +
                              ["--assignment", f_assign])
         check(code == 2 and "not a whole number" in err, "a malformed count exits 2")
