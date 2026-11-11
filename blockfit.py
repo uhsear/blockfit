@@ -46,6 +46,7 @@ SAMPLE = 5            # example GEOIDs shown per reason; the counts are always e
 DIGITS = "0123456789"
 RESERVED_COLUMNS = ("district", "blocks")   # the summary CSV names its own
 # A spreadsheet runs a cell that starts with one of these as a formula (OWASP, CSV Injection).
+NULL_LABELS = ("-1", "null", "none", "nan", "n/a", "unassigned", "unknown")   # "no district"
 FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 EXIT_OK = 0
@@ -169,6 +170,12 @@ def uncell(value):
     return value
 
 
+def is_null_label(label):
+    """True for a label GIS tools use for "no district": all zeros, -1, null, none and so on."""
+    text = label.strip().lower()
+    return text in NULL_LABELS or (is_digits(text) and not text.strip("0"))
+
+
 def safe(text):
     """text with every non-ASCII character escaped, so a strict stdout cannot fail on a path."""
     return text.encode("ascii", "backslashreplace").decode("ascii")
@@ -253,6 +260,14 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
         row["blocks"] += 1
         for col in columns:
             row[col] += blocks[geoid][col]
+    nulls = sorted((d for d in districts if is_null_label(d)), key=district_key)
+    if nulls:
+        reasons.append(
+            "NULL-DISTRICT: %d block(s) hold the district label(s) %s, holding %d %s. GIS tools "
+            "write these labels for a block with no district, so they may be unassigned blocks "
+            "and not a district. If a label is a real district, rename it in the input file" %
+            (sum(districts[d]["blocks"] for d in nulls), sample(nulls),
+             sum(districts[d][measure] for d in nulls), measure))
     assigned_totals = dict((col, sum(row[col] for row in districts.values())) for col in columns)
     return {
         "ok": not reasons,
@@ -308,8 +323,9 @@ def render(report, names, year, county, parts_info=None):
         lines.append("  pieces with zero area ignored: %d" % parts_info["empty"])
     lines.append("")
     if report["ok"]:
-        lines.append("RECONCILED: every block is in exactly one district and the district sums "
-                     "equal the extract.")
+        lines.append("RECONCILED%s: every block is in exactly one district and the district "
+                     "sums equal the extract." %
+                     ("" if report["vintage_verified"] else " (vintage not verified)"))
     else:
         lines.append("REFUSED: %d reason(s)" % len(report["reasons"]))
         for number, reason in enumerate(report["reasons"], 1):
@@ -801,6 +817,18 @@ def self_test():
     check(not nothing["ok"] and "EMPTY" in text_of(nothing),
           "an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect")
 
+    check([is_null_label(x) for x in
+           ("0", "000", "-1", " NULL ", "None", "NaN", "n/a", "Unassigned", "unknown")] == [True] * 9 and
+          not any(is_null_label(x) for x in ("1", "10", "A", "01", "-2", "")),
+          "the labels GIS tools write for no district are recognised, and real districts are not")
+    null_report = rec([(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "0")])
+    check(not null_report["ok"] and "NULL-DISTRICT: 1 block(s) hold the district label(s) 0, "
+          "holding 30 total" in text_of(null_report),
+          "a district 0 that holds blocks is refused, with its block and people counts  "
+          "<-- pinned defect")
+    check(rec(GOOD)["ok"] and "NULL-DISTRICT" not in text_of(rec(GOOD)),
+          "and an assignment with no such label is not")
+
     # ---- a path with an accent must not crash a strict ASCII stdout
     check(safe("caf\u00e9.csv") == "caf\\xe9.csv" and safe("plain.csv") == "plain.csv",
           "a path with an accented letter is printed escaped, so an ASCII pipe cannot raise  "
@@ -865,12 +893,12 @@ def self_test():
            "a blank district is refused, not read as district ''", InputError)
     raises(lambda: assignment_of("geoid,district\n%s,D\u00e9\n" % G1),
            "a non-ASCII district is refused", InputError)
-    raises(lambda: assignment_of("geoid,district\n%s,＝A\n" % G1),
+    raises(lambda: assignment_of("geoid,district\n%s,\uff1dA\n" % G1),
            "a full-width equals sign in a district is refused as non-ASCII, so OWASP's full-width "
            "formula characters cannot reach the output", InputError)
     raises(lambda: assignment_of("geoid,district\n%s,A\tB\n" % G1),
            "a tab inside a district is refused as not printable", InputError)
-    raises(lambda: parse(("geoid,＝total\n%s,1\n" % G1).encode("utf-8"), "t"),
+    raises(lambda: parse(("geoid,\uff1dtotal\n%s,1\n" % G1).encode("utf-8"), "t"),
            "and so is a full-width formula character in a column name", InputError)
     check(assignment_of("geoid,district\n%s,nan\n%s,01\n%s,1\n" % (G1, G2, G3))[0] ==
           {G1: "nan", G2: "01", G3: "1"},
@@ -986,6 +1014,7 @@ def self_test():
     f_tag10 = put("tag10.csv", assign_text.replace("geoid", "geoid10", 1))
     f_bigdist = put("bigdist.csv", assign_text.replace(",1\n", ",%s\n" % ("7" * 5000)))
     f_tag20 = put("tag20.csv", assign_text.replace("geoid", "geoid20", 1))
+    f_null = put("null-district.csv", assign_text.replace("%s,2\n" % G4, "%s,0\n" % G4))
     before = listing()
 
     def run(argv, out=None):
@@ -1060,9 +1089,17 @@ def self_test():
               "documented limit: plain geoid headers carry no vintage, so --year 2010 reconciles")
         check("vintage: not verified" in out and "2010 is your claim, not a finding" in out,
               "and the report says the vintage was not verified  <-- pinned defect")
+        check("RECONCILED (vintage not verified): every block" in out,
+              "and the verdict line carries the same words, so a log that keeps only the verdict "
+              "keeps the caveat  <-- pinned defect")
         code, out, err = run(base + ["--assignment", f_tag20])
-        check(code == 0 and "vintage: not verified" not in out,
-              "one header tag is enough to call the vintage checked")
+        check(code == 0 and "vintage: not verified" not in out and "RECONCILED: every block" in out,
+              "one header tag is enough to call the vintage checked, and the verdict says plain "
+              "RECONCILED")
+        code, out, err = run(base + ["--assignment", f_null])
+        check(code == 1 and "NULL-DISTRICT: 1 block(s)" in out and "RECONCILED" not in out,
+              "a block given district 0 is refused on the command line, not reconciled with a "
+              "phantom district  <-- pinned defect")
         code, out, err = run(base + ["--assignment", f_bigdist])
         check(code == 0 and "RECONCILED" in out,
               "a district label of 5000 digits reconciles and does not end in a traceback  "

@@ -10,8 +10,9 @@ outside the district tiling. That block is in no district. Its people are in no 
 
 The district table still prints. Each district has a believable number. The five numbers add up to a
 little less than the county total, and nothing in the job complains. In the fixture below the short
-table is 380 against 730. In a real county the gap can be a fraction of a percent, which is small
-enough to survive a review and large enough to be wrong.
+table is 380 against 730. A real county's gap could be a fraction of a percent, small
+enough to survive a review and large enough to be wrong. That is an illustration. I did not run a
+real county.
 
 The same job can fail a second way. Census redraws its blocks every decade. A district file made
 from the 2020 blocks, joined to 2010 people, shares many GEOIDs with the right file and disagrees
@@ -81,6 +82,8 @@ PASS  a GEOID10 extract against --year 2020 is refused  <-- pinned defect
 ...
 PASS  an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect
 ...
+PASS  a district 0 that holds blocks is refused, with its block and people counts  <-- pinned defect
+...
 PASS  a text cell that starts with an equals sign gets one apostrophe in front  <-- pinned defect
 ...
 PASS  a label that is itself an apostrophe and a formula character gets a second apostrophe, so it is not mistaken for an escaped one  <-- pinned defect
@@ -90,6 +93,9 @@ PASS  uncell(cell(x)) gives x back for 21 awkward labels, apostrophes included  
 PASS  a run without --apply writes nothing at all  <-- pinned defect
 ...
 PASS  and the report says the vintage was not verified  <-- pinned defect
+PASS  and the verdict line carries the same words, so a log that keeps only the verdict keeps the caveat  <-- pinned defect
+...
+PASS  a block given district 0 is refused on the command line, not reconciled with a phantom district  <-- pinned defect
 ...
 PASS  a district label of 5000 digits reconciles and does not end in a traceback  <-- pinned defect
 ...
@@ -120,15 +126,16 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-210 assertions, 0 failed
+215 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 210 assertions pass
-on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
-Ubuntu with Python 3.12.3. I did not run Python 3.11. The full output on
-Windows (3.13) and the full output on Ubuntu are byte for byte identical apart from the first line
-of the Ubuntu capture, which is the `python3 --version` line I printed before the run.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (847 statements, 180 branches,
+The block is abridged. `...` marks each place where lines are left out. The same 215 assertions pass
+on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
+Ubuntu with Python 3.12.3. The full output on
+Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
+adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
+which is the `python3 --version` line I printed before the run.
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (862 statements, 182 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -212,6 +219,14 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
    whichever file holds it. It is not counted as an orphan or as unassigned.
 6. **The control total.** With `--control-total`, the extract's `--measure` must equal it.
 7. **Not empty.** An extract with no rows is `EMPTY`. Zero equals zero is not a reconciliation.
+8. **No "no district" label.** A district labelled `0` (or any run of zeros), `-1`, `null`, `none`,
+   `nan`, `n/a`, `unassigned` or `unknown`, in any letter case, that holds blocks is a
+   `NULL-DISTRICT` refusal. GIS tools write those labels for a block that no district holds, so
+   the table would carry a phantom district. If one is a real district, rename it in your file.
+
+When neither file carries a `GEOID10` or `GEOID20` tag the vintage is not verified, and a run that
+passes says so on the verdict line too: `RECONCILED (vintage not verified): ...`. The exit code is
+still 0, because every other check passed. A tagged file gives the plain `RECONCILED:` line.
 
 The district sums are printed beside the extract sums for every count column. They are equal when
 no block is lost, so equal sums are needed for `RECONCILED`. They are not enough. A repeated block,
@@ -261,7 +276,7 @@ $ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county
   ties on area broken by the lowest district: 1
   pieces with zero area ignored: 1
 
-RECONCILED: every block is in exactly one district and the district sums equal the extract.
+RECONCILED (vintage not verified): every block is in exactly one district and the district sums equal the extract.
 ```
 
 The block with 350 people in water is in the pieces file here, with a part of its own, so the same
@@ -285,7 +300,7 @@ too.
 
 The extract is a CSV with a GEOID column and count columns. The CSV that
 [pl94](https://github.com/uhsear/pl94) writes fits: its 15 columns load, 14 of them as counts, and
-the self-test loads a synthetic CSV with that header. blockfit does not read the PL 94-176 zip. The
+the self-test loads a synthetic CSV with that header. blockfit does not read the PL 94-171 zip. The
 extract carries the people. It does not carry a second copy of the county total, which is why
 `--control-total` exists. Take the control from the county record in the same PL file, which pl94
 already reconciles to the extract.
@@ -307,7 +322,7 @@ projection is the safe choice. blockfit does not check any of this.
 | 0 | The assignment reconciles to the extract. |
 | 1 | It does not. The reasons are printed. A failed `--self-test` also exits 1. |
 | 2 | A file could not be read or is malformed, an output could not be written, or the report could not be written to stdout. argparse also exits 2 for a flag it does not know, such as `--ap`. |
-| 64 | Usage error found by blockfit: a missing `--blocks`, `--year` or `--county`, a bad value, both or neither of `--assignment` and `--parts`, an output without `--apply`, `--apply` with no output, or an output that is also an input. |
+| 64 | Usage error found by blockfit: a missing `--blocks`, `--year` or `--county`, a bad value, both or neither of `--assignment` and `--parts`, `--assign-out` without `--parts`, an output without `--apply`, `--apply` with no output, an output that is also an input, or `--out` and `--assign-out` naming the same file. |
 
 Exit 1 and exit 2 are kept apart on purpose. A scheduled job reads 1 as "the numbers disagreed",
 which is a fact about the data. A file that could not be written is a fact about the disk.
@@ -316,8 +331,8 @@ which is a fact about the data. A file that could not be written is a fact about
 
 Without `--apply`, a normal run writes no file. The self-test lists the directory before and after
 a run without it, and asserts that the listing is unchanged. `--self-test` is the one exception:
-it writes about two dozen fixture files into a new folder in the system temporary directory, runs
-against them, and deletes the folder when it passes. It never writes beside the inputs or in the
+it writes about thirty fixture files into a new folder in the system temporary directory, runs
+against them, and deletes the folder when it ends, whether the checks passed or failed. It never writes beside the inputs or in the
 current directory.
 
 `--out` writes one row per district, sorted with whole numbers first, then text. `--assign-out`
@@ -437,20 +452,30 @@ and not only people.
   wrong decade and identical block sets reconcile. A wrong `--year` given with consistent files
   reconciles. `--year` is a claim that blockfit cannot verify. pl94 writes a plain `geoid` header
   for both vintages. When neither file carries a tag, the report says "vintage: not verified" and
-  that the year is your claim, and the exit code stays 0. One tagged file is enough to drop that
-  line, and the tag is then checked on that file only.
+  that the year is your claim, and the verdict line reads `RECONCILED (vintage not verified)`. The
+  exit code stays 0. One tagged file is enough to drop both notes, and the tag is then checked on
+  that file only.
 - **The control total is trusted.** `--control-total` checks the extract against the number. It
   cannot check the number. A wrong control gives a wrong verdict.
 - **District labels are text.** A label is compared as text after trimming. `1` and `01` are two
-  districts. A missing value written as `nan`, `None`, `0` or `NULL` is a district of its own. Such
-  an assignment reconciles with exit 0 and a phantom row in the table, so read the district table.
-  blockfit does not know which labels are valid. A label that starts with `=`, `+`, `-` or `@` is
+  districts. blockfit does not know which labels are valid. It refuses the labels that GIS tools
+  write for "no district" (see check 8), and only those. Any other placeholder, such as `99` or
+  `water`, is a district of its own and reconciles, so read the district table. A label that starts with `=`, `+`, `-` or `@` is
   written with an apostrophe in front (see Spreadsheet formulas).
+- **Two labels can read as one.** The reader removes one apostrophe from a label such as `'=x`. A
+  hand-written file that holds both `=x` and `'=x` as separate districts is read as one district,
+  with no warning. A file that blockfit wrote does not do this, because it writes `''=x` for
+  the second label. A hand-written label that is an apostrophe and then a formula character, such
+  as `'=C`, reads as `=C`.
 - **The apostrophe is visible.** The guard changes the text. A spreadsheet that opens the CSV shows
   the apostrophe, because it is part of the cell, and blockfit's own reader removes it. OWASP warns
   that Excel can remove escape characters when it saves a CSV and opens it again, which would make
   a cell active again. I did not open the files in Excel, LibreOffice or Google Sheets for this
   release. The test is that no written cell starts with one of the seven characters.
+- **The guard tests reach tab and carriage return indirectly.** A tab, a carriage return or a line
+  feed cannot reach a label or a column name, because the reader strips or refuses them. The
+  command line tests reach those two characters only through a label's leading whitespace. The
+  unit tests call `cell()` with them directly.
 - **The report is not guarded.** The district labels printed to stdout are written as they are,
   because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
 - **Areas are trusted.** `--parts` areas are not checked for units or projection. A mixed set gives
@@ -507,10 +532,12 @@ and not only people.
   noise in the file (0.30000000000000004 against 0.3) are not reported as ties.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
   header as a good one. Only the exit code and the report on stdout say that it is short.
-- **The self-test cleans up on success only.** A crash part way through leaves a `blockfit-*`
-  folder in the system temporary directory.
-- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.12 and 3.13, and Ubuntu with Python 3.12.
-  Not Python 3.11. Not macOS.
+- **The self-test cleans up at the end, not after a crash.** The folder is removed after the checks
+  run, passed or failed. A crash or a kill part way through leaves a `blockfit-*` folder in the
+  system temporary directory. The self-test is the one run that writes without `--apply`, and
+  only there.
+- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.11, 3.12 and 3.13, and Ubuntu with
+  Python 3.12. Not macOS.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
@@ -532,6 +559,14 @@ Read on 2026-10-22, except where a line says otherwise.
 - Census Bureau, relationship files page (`census.gov/geographies/reference-files/time-series/geo/relationship-files.2020.html`):
   the block relationship files compare the universe of 2010 tabulation blocks to the universe of
   2020 tabulation blocks.
+- Python documentation, `signal` module, "Note on SIGPIPE" (`docs.python.org/3/library/signal.html`,
+  read on 2026-11-11): the recipe for `BrokenPipeError`, which redirects the stdout descriptor to
+  `os.devnull` with `os.dup2` because "Python flushes standard streams on exit". blockfit's
+  `write_failed` follows it.
+- Python documentation, `csv` module (`docs.python.org/3/library/csv.html`, read on 2026-11-11): a
+  file object given to the reader "should be opened with newline=''", and the footnote adds that
+  without it an extra \r is written on platforms that use \r\n line endings. blockfit opens its
+  output with `newline=""` and reads through `io.StringIO(text, newline="")`.
 - Esri, Intersect tool and `SearchCursor` documentation (`doc.esri.com/en/arcgis-pro/latest/`): the
   wording quoted above.
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
@@ -549,7 +584,7 @@ none of them.
 
 ## Related
 
-- [pl94](https://github.com/uhsear/pl94) reads the PL 94-176 bulk file and refuses a block extract
+- [pl94](https://github.com/uhsear/pl94) reads the PL 94-171 bulk file and refuses a block extract
   that does not reconcile to the county record in the same file. blockfit is its companion: pl94
   decides the extract is right, and blockfit decides the districts account for all of it.
 - [maup](https://github.com/mggg/maup) assigns blocks, precincts and districts to each other from
