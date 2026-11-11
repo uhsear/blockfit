@@ -320,7 +320,7 @@ the inputs to it. That is the shape `--parts` needs. Export the block GEOID, the
 polygon area. I have not run an Intersect for this release. The `SHAPE@AREA` token is documented as
 "a double of the feature's area" and the page does not say the units. blockfit compares areas as
 plain numbers and cannot know their unit. Take every area from one projection. maup's README warns
-that "many of maup's functions behave badly in geographic projections", and an equal-area
+that "Many of maup's functions behave badly in geographic projections", and an equal-area
 projection is the safe choice. blockfit does not check any of this.
 
 ## Exit codes
@@ -339,7 +339,7 @@ which is a fact about the data. A file that could not be written is a fact about
 
 Without `--apply`, a normal run writes no file. The self-test lists the directory before and after
 a run without it, and asserts that the listing is unchanged. `--self-test` is the one exception:
-it writes about thirty fixture files into a new folder in the system temporary directory, runs
+it writes about thirty-five fixture files into a new folder in the system temporary directory, runs
 against them, and deletes the folder when it ends, whether the checks passed or failed. It never writes beside the inputs or in the
 current directory.
 
@@ -462,7 +462,8 @@ and not only people.
   for both vintages, so without `--trust-year` a run on two plain files is refused with
   `UNVERIFIED-VINTAGE` and exit 1. With `--trust-year` the report says "vintage: not verified" and
   that the year is your claim, the verdict line reads `RECONCILED (vintage not verified)`, and the
-  exit code is 0. A job that passes `--trust-year` has accepted that claim. The exit code does not
+  exit code is 0 by design: the caller supplied the year, so the tool is not
+  failing to tell. A job that passes `--trust-year` has accepted that claim. The exit code does not
   carry the caveat; only the verdict line does. One tagged file is enough to drop both notes, and
   the tag is then checked on that file only.
 - **The control total is trusted.** `--control-total` checks the extract against the number. It
@@ -476,7 +477,8 @@ and not only people.
   hand-written file that holds both `=x` and `'=x` as separate districts is read as one district,
   with no warning. A file that blockfit wrote does not do this, because it writes `''=x` for
   the second label. A hand-written label that is an apostrophe and then a formula character, such
-  as `'=C`, reads as `=C`.
+  as `'=C`, reads as `=C`. The same strip turns a hand-written `'-1` into `-1`, which is a
+  no-district label, so that file is refused with `NULL-DISTRICT`.
 - **The apostrophe is visible.** The guard changes the text. A spreadsheet that opens the CSV shows
   the apostrophe, because it is part of the cell, and blockfit's own reader removes it. OWASP warns
   that Excel can remove escape characters when it saves a CSV and opens it again, which would make
@@ -544,8 +546,14 @@ and not only people.
   district cell, as a spatial join writes for a block outside the district tiling, is exit 2, not
   an `UNASSIGNED` refusal with exit 1.
 - **The output path is not checked for type.** A device name such as `NUL` or `/dev/null` is
-  reported as written, and nothing is stored. File names are echoed with non-ASCII escaped but
-  ASCII control characters left as they are.
+  reported as written, and nothing is stored. File names in the stdout report are echoed with
+  non-ASCII escaped but ASCII control characters left as they are, so a hostile name can change
+  what a terminal shows. File names in stderr messages are not escaped by blockfit at all. On a
+  UTF-8 stream a non-ASCII name prints as typed. On an ASCII stream Python escapes it.
+- **`--apply` replaces a file without asking.** An existing `--out` or `--assign-out` file that is
+  not an input is overwritten. blockfit refuses only a path that is one of its own inputs.
+- **`--self-test` ignores the output flags.** `--out` or `--assign-out` given with `--self-test`
+  is dropped with no message, and nothing is written outside the temporary folder.
 - **Float noise is not a tie.** Areas that are equal in exact arithmetic but differ by binary float
   noise in the file (0.30000000000000004 against 0.3) are not reported as ties.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
@@ -579,7 +587,8 @@ Read on 2026-10-22, except where a line says otherwise.
   2020 tabulation blocks.
 - Python documentation, `signal` module, "Note on SIGPIPE" (`docs.python.org/3/library/signal.html`,
   read on 2026-11-11): the recipe for `BrokenPipeError`, which redirects the stdout descriptor to
-  `os.devnull` with `os.dup2` because "Python flushes standard streams on exit". blockfit's
+  `os.devnull` with `os.dup2`. The phrase "Python flushes standard streams on exit" is a comment
+  in that page's example code, not its prose. blockfit's
   `write_failed` follows it.
 - Python documentation, `csv` module (`docs.python.org/3/library/csv.html`, read on 2026-11-11): a
   file object given to the reader "should be opened with newline=''", and the footnote adds that
@@ -588,7 +597,7 @@ Read on 2026-10-22, except where a line says otherwise.
 - Esri, Intersect tool (`pro.arcgis.com/en/pro-app/latest/tool-reference/analysis/intersect.htm`)
   and `SearchCursor` (`pro.arcgis.com/en/pro-app/latest/arcpy/data-access/searchcursor-class.htm`),
   read on 2026-11-11: "Features or portions of features that overlap in all layers or feature
-  classes will be written to the output", and "SHAPE@AREA: A double of the feature's area."
+  classes will be written to the output feature class", and "SHAPE@AREA: A double of the feature's area."
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
   and the geographic coordinates warning.
 - OWASP, CSV Injection (`owasp.org/www-community/attacks/CSV_Injection`, read on 2026-11-11 at
