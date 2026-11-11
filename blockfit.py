@@ -24,7 +24,8 @@ of the table, so the tie rule and the split blocks are reported rather than hidd
         --control-total 1234 --out districts.csv --apply
 
 Nothing is written unless --apply is given. Exit codes: 0 reconciled, 1 refused (the data
-disagree), 2 a file could not be read or written, 64 usage error.
+disagree), 2 a file could not be read or written, 3 reconciled but the vintage is
+not verified (--trust-year with plain geoid headers), 64 usage error.
 """
 
 from __future__ import print_function

@@ -60,8 +60,8 @@ maup applies it to real geometry with spatial indexes, which blockfit does not d
 geometry and a Python environment with geopandas, use maup to make the assignment.
 
 What blockfit adds is the refusal after the assignment. maup's README shows how to count unassigned
-blocks, and how to compare the summed block totals with the summed target totals to see the loss,
-by hand and by printing the two sums. That comparison is the one blockfit makes, as a refusal with an
+blocks, and it prints the summed block columns and the summed target columns one after the other,
+so a reader can compare the two sums by hand. That comparison is the one blockfit makes, as a refusal with an
 exit code. maup's README does not describe a check that the sums equal a control total, a check
 that the assignment and the extract hold the same blocks, or a check of block vintage. blockfit
 makes those checks and nothing else. Read on 2026-10-24; maup may have changed since.
@@ -133,12 +133,12 @@ PASS  the harness records a false check, a missing exception and a wrong excepti
 ```
 
 The block is abridged. `...` marks each place where lines are left out. The same 220 assertions pass
-on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
+on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
 which is the `python3 --version` line I printed before the run.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (882 statements, 184 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (887 statements, 188 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -551,8 +551,8 @@ and not only people.
   `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
   labels (the tilde) is not pinned by the self-test. Replacing `math.fsum` with `sum` is caught on
   Python 3.9 and 3.10 in the runs made here. The Python documentation says the built-in `sum` is
-  compensated from 3.12, and no 3.11 interpreter was available, so 3.11 was not run. The 3.9 and
-  3.10 runs are the ones that catch it.
+  compensated from 3.12. I did not run that mutant on 3.11. The 3.9 and 3.10 runs are the ones
+  that catch it.
 - **Blank and odd lines.** A trailing line of spaces or commas is a malformed row and ends the run
   with exit 2, not a skipped blank line. Only comma separated files are read. A semicolon file exits 2 with a
   missing-GEOID-column message that does not name the delimiter. A tab file exits 2 with `has an
@@ -560,7 +560,8 @@ and not only people.
   district cell, as a spatial join writes for a block outside the district tiling, is exit 2, not
   an `UNASSIGNED` refusal with exit 1.
 - **The output path is not checked for type.** A device name such as `NUL` or `/dev/null` is
-  reported as written, and nothing is stored. File names in the stdout report are echoed with
+  reported as written, and nothing is stored. The `NUL` case is a Windows behaviour that I did not
+  check against Microsoft documentation. File names in the stdout report are echoed with
   non-ASCII escaped but ASCII control characters left as they are, so a hostile name can change
   what a terminal shows. File names in stderr messages are not escaped by blockfit at all. On a
   UTF-8 stream a non-ASCII name prints as typed. On an ASCII stream Python escapes it.
@@ -570,14 +571,21 @@ and not only people.
   is dropped with no message, and nothing is written outside the temporary folder.
 - **Float noise is not a tie.** Areas that are equal in exact arithmetic but differ by binary float
   noise in the file (0.30000000000000004 against 0.3) are not reported as ties.
+- **`--parts` with `--allow-unreconciled` writes every overlay block.** `--assign-out` then holds
+  each GEOID from the overlay, including blocks the extract does not have, so the written file
+  reads back through `--assignment` as an `ORPHAN` refusal. This follows from the override.
+- **Loose self-test labels.** Several labels say "exits 0" where the assertion is `EXIT_UNVERIFIED`
+  (3), for example a complete assignment under `--trust-year` with plain headers. The assertions
+  are right. The README does not quote those labels.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
   header as a good one. Only the exit code and the report on stdout say that it is short.
 - **The self-test cleans up at the end, not after a crash.** The folder is removed after the checks
   run, passed or failed. A crash or a kill part way through leaves a `blockfit-*` folder in the
   system temporary directory. The self-test is the one run that writes without `--apply`, and
   only there.
-- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.12 and 3.13, and Ubuntu with
-  Python 3.12. Not Python 3.11 and not macOS.
+- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.11, 3.12 and 3.13, and Ubuntu with
+  Python 3.12. The 3.11 run was made once (220 assertions, 0 failed) and is not part of the quoted
+  capture. Not macOS.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
@@ -610,7 +618,10 @@ Read on 2026-10-22, except where a line says otherwise.
   output with `newline=""` and reads through `io.StringIO(text, newline="")`.
 - Esri, Intersect tool (`pro.arcgis.com/en/pro-app/latest/tool-reference/analysis/intersect.htm`)
   and `SearchCursor` (`pro.arcgis.com/en/pro-app/latest/arcpy/data-access/searchcursor-class.htm`),
-  read on 2026-11-11: "Features or portions of features that overlap in all layers or feature
+  read on 2026-11-11. Esri now redirects both with HTTP 301 to
+  `doc.esri.com/en/arcgis-pro/latest/tool-reference/analysis/intersect.html` and
+  `doc.esri.com/en/arcgis-pro/latest/arcpy/data-access/searchcursor-class.html`, and both sentences
+  are on the new pages (checked 2026-11-11). The quoted sentences: "Features or portions of features that overlap in all layers or feature
   classes will be written to the output feature class", and "SHAPE@AREA: A double of the feature's area."
 - Python documentation, "What's New In Python 3.12" (`docs.python.org/3/whatsnew/3.12.html`, read
   on 2026-11-11): "sum() now uses Neumaier summation to improve accuracy and commutativity when
