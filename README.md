@@ -133,7 +133,7 @@ PASS  the harness records a false check, a missing exception and a wrong excepti
 ```
 
 The block is abridged. `...` marks each place where lines are left out. The same 220 assertions pass
-on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
+on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
@@ -233,8 +233,9 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
    nothing in the files says which decade they are, and `--year` is only your claim. That is an
    `UNVERIFIED-VINTAGE` refusal, with exit 1. `pl94` writes a plain `geoid` header, so this is the
    common case. If you know the year, pass `--trust-year`. The run then says so in the report and
-   on the verdict line, `RECONCILED (vintage not verified): ...`, and exits 0 when every other
-   check passes. A tagged file gives the plain `RECONCILED:` line and needs no flag.
+   on the verdict line, `RECONCILED (vintage not verified): ...`, and exits 3 when every other
+   check passes, because the tool could not tell the decade. A tagged file gives the plain
+   `RECONCILED:` line, needs no flag, and exits 0.
 
 The district sums are printed beside the extract sums for every count column. They are equal when
 no block is lost, so equal sums are needed for `RECONCILED`. They are not enough. A repeated block,
@@ -265,7 +266,8 @@ in the same district are added. The block goes to the district with the largest 
 - The areas are added with `math.fsum`, which returns the correctly rounded sum of the exact inputs.
   A running float sum depends on the order of the rows, and the built-in `sum` is only compensated
   from Python 3.12. The self-test pins a case where order decides the tie. That pin catches a switch
-  to `sum` on Python 3.9 to 3.11 only. On 3.12 and later `sum` gives the same answer.
+  to `sum` on Python 3.9 and 3.10 in the runs made here. On 3.12 and later `sum` gives the same
+  answer.
 - The report counts blocks that touch more than one district and the people in them. The rule puts
   each whole block in one district, so that number is an upper bound on the people it can place in
   the wrong one.
@@ -327,8 +329,9 @@ projection is the safe choice. blockfit does not check any of this.
 
 | Code | Meaning |
 |---|---|
-| 0 | The assignment reconciles to the extract. |
+| 0 | The assignment reconciles to the extract, and a `GEOID10` or `GEOID20` header tag checked the vintage. |
 | 1 | It does not, or the vintage could not be checked and `--trust-year` was not given. The reasons are printed. A failed `--self-test` also exits 1. |
+| 3 | It reconciles, but neither file carries a `GEOID10` or `GEOID20` tag and `--trust-year` accepted `--year` as your claim. The tool could not tell the decade, so it does not report 0. A job that accepts the claim must accept 3 on purpose. `--apply` still writes. |
 | 2 | A file could not be read or is malformed, an output could not be written, or the report could not be written to stdout. argparse also exits 2 for a flag it does not know, such as `--ap`. |
 | 64 | Usage error found by blockfit: a missing `--blocks`, `--year` or `--county`, a bad value, both or neither of `--assignment` and `--parts`, `--assign-out` without `--parts`, an output without `--apply`, `--apply` with no output, an output that is also an input, or `--out` and `--assign-out` naming the same file. |
 
@@ -386,6 +389,9 @@ The self-test gives the guard those characters directly. It also shows a tab and
 return stripped from a label, so that the formula character they hid is guarded afterwards. The
 full-width variants of `=`, `+`, `-` and `@` that OWASP also lists are not ASCII, and blockfit
 refuses a non-ASCII label or column name.
+
+For the reconciled fixture that `--self-test` builds, `--out` writes this district table. It is
+not the output of a refused run:
 
 ```
 district,blocks,total,arealand
@@ -462,10 +468,10 @@ and not only people.
   for both vintages, so without `--trust-year` a run on two plain files is refused with
   `UNVERIFIED-VINTAGE` and exit 1. With `--trust-year` the report says "vintage: not verified" and
   that the year is your claim, the verdict line reads `RECONCILED (vintage not verified)`, and the
-  exit code is 0 by design: the caller supplied the year, so the tool is not
-  failing to tell. A job that passes `--trust-year` has accepted that claim. The exit code does not
-  carry the caveat; only the verdict line does. One tagged file is enough to drop both notes, and
-  the tag is then checked on that file only.
+  exit code is 3, not 0. Earlier versions exited 0 here, which let a wrong `--year` look the same
+  as a checked one to a scheduler. A job that passes `--trust-year` has accepted the claim, and it
+  must treat 3 as success on purpose. One tagged file is enough to drop both notes and give exit 0,
+  and the tag is then checked on that file only.
 - **The control total is trusted.** `--control-total` checks the extract against the number. It
   cannot check the number. A wrong control gives a wrong verdict.
 - **District labels are text.** A label is compared as text after trimming. `1` and `01` are two
@@ -488,10 +494,17 @@ and not only people.
   feed cannot reach a label or a column name, because the reader strips or refuses them. The
   command line tests reach those two characters only through a label's leading whitespace. The
   unit tests call `cell()` with them directly.
+- **No network code path.** blockfit.py has no `urllib`, `http` or `socket` use outside the
+  self-test's trap, so there is nothing to exercise against a local `http.server` stub.
+- **A spreadsheet can still reread plain labels.** The guard stops formulas, not data mangling. A
+  spreadsheet may turn a label such as `1-2`, `3/4`, `1E3` or `01` into a date or a number. Read the
+  CSV with a tool that keeps text.
+- **Some non-ASCII header spellings pass as ASCII names.** The Kelvin sign (U+212A) lowercases to
+  ASCII `k`, so a header written with it is accepted and shown as `k`. No formula character is
+  reachable this way and the output stays ASCII.
 - **The report is not guarded.** The district labels printed to stdout are written as they are,
   because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
-- **The no-district list is fixed.** A label such as `<Null>` (how an ArcGIS Pro table view shows a
-  null) or `NA` is not on it, so it reconciles as a real district. Read the district table.
+- **The no-district list is fixed.** A label such as `<Null>` or `NA` is not on it, so it reconciles as a real district. Read the district table.
 - **A trailing empty column is refused.** A CSV whose header ends in a comma, as some spreadsheet
   exports do, exits 2 with `empty or non-ASCII column name`. Remove the column first.
 - **Areas are trusted.** `--parts` areas are not checked for units or projection. A mixed set gives
@@ -537,8 +550,9 @@ and not only people.
   in the header line, the assignment or parts word in the header line, the closing flush, or the
   `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
   labels (the tilde) is not pinned by the self-test. Replacing `math.fsum` with `sum` is caught on
-  Python 3.11 and earlier only. On 3.12 and 3.13 the built-in `sum` is compensated, so the Python
-  3.9, 3.10 and 3.11 runs are the ones that catch it.
+  Python 3.9 and 3.10 in the runs made here. The Python documentation says the built-in `sum` is
+  compensated from 3.12, and no 3.11 interpreter was available, so 3.11 was not run. The 3.9 and
+  3.10 runs are the ones that catch it.
 - **Blank and odd lines.** A trailing line of spaces or commas is a malformed row and ends the run
   with exit 2, not a skipped blank line. Only comma separated files are read. A semicolon file exits 2 with a
   missing-GEOID-column message that does not name the delimiter. A tab file exits 2 with `has an
@@ -562,8 +576,8 @@ and not only people.
   run, passed or failed. A crash or a kill part way through leaves a `blockfit-*` folder in the
   system temporary directory. The self-test is the one run that writes without `--apply`, and
   only there.
-- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.11, 3.12 and 3.13, and Ubuntu with
-  Python 3.12. Not macOS.
+- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.12 and 3.13, and Ubuntu with
+  Python 3.12. Not Python 3.11 and not macOS.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
@@ -598,6 +612,9 @@ Read on 2026-10-22, except where a line says otherwise.
   and `SearchCursor` (`pro.arcgis.com/en/pro-app/latest/arcpy/data-access/searchcursor-class.htm`),
   read on 2026-11-11: "Features or portions of features that overlap in all layers or feature
   classes will be written to the output feature class", and "SHAPE@AREA: A double of the feature's area."
+- Python documentation, "What's New In Python 3.12" (`docs.python.org/3/whatsnew/3.12.html`, read
+  on 2026-11-11): "sum() now uses Neumaier summation to improve accuracy and commutativity when
+  summing floats or mixed ints and floats." That is why `math.fsum` matters on 3.11 and earlier.
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
   and the geographic coordinates warning.
 - OWASP, CSV Injection (`owasp.org/www-community/attacks/CSV_Injection`, read on 2026-11-11 at
@@ -619,7 +636,8 @@ none of them.
 - [maup](https://github.com/mggg/maup) assigns blocks, precincts and districts to each other from
   real geometry. Use it to make an assignment. Use blockfit to check one.
 - Other repositories are called `blockfit` or close to it. `gh search repos blockfit --limit 10`
-  on 2026-10-24 returned ten, and this repository was not among them; it appears at `--limit 30`.
+  on 2026-10-24, before this repository was published, returned ten, and this repository was not
+  among them. A reader cannot repeat that check, because the repository is public now.
   The ones with a real description were a genetic-algorithm shape-packing program (`BlockFitter`),
   a hackathon project from 2018 and its demo, and a minimal heap allocator in C (`kundurz/blockfit`).
   None is about Census blocks as far as the descriptions say. The rest had no description or a

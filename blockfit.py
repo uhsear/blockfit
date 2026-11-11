@@ -53,6 +53,7 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_IO = 2
 EXIT_USAGE = 64
+EXIT_UNVERIFIED = 3
 
 
 class InputError(Exception):
@@ -608,7 +609,12 @@ def main(argv=None, out=None, err=None):
         out.flush()
     except (OSError, ValueError) as exc:
         return write_failed(err, "the report", exc, out, real_stdout)
-    code = EXIT_OK if report["ok"] else EXIT_REFUSED
+    if not report["ok"]:
+        code = EXIT_REFUSED
+    elif report["vintage_verified"]:
+        code = EXIT_OK
+    else:
+        code = EXIT_UNVERIFIED   # reconciled, but --year is a claim the files cannot back
     if not args.apply:
         return code
     if not report["ok"] and not args.allow_unreconciled:
@@ -1069,7 +1075,7 @@ def self_test():
         check(len(net_calls) == 1, "and it recorded the attempt")
         del net_calls[:]
         code, out, err = run(base + ["--assignment", f_assign])
-        check(code == 0 and "RECONCILED" in out and err == "",
+        check(code == EXIT_UNVERIFIED and "RECONCILED" in out and err == "",
               "a complete assignment exits 0 and prints RECONCILED")
         rows = [line.split() for line in out.splitlines()]
         check(["DISTRICT", "BLOCKS", "total", "arealand"] in rows and
@@ -1106,8 +1112,9 @@ def self_test():
               "and against --year 2020 it is refused  <-- pinned defect")
         code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
                               "--trust-year", "--assignment", f_assign])
-        check(code == 0 and "2010 blocks" in out,
-              "documented limit: plain geoid headers carry no vintage, so --year 2010 reconciles")
+        check(code == 3 and EXIT_UNVERIFIED == 3 and "2010 blocks" in out,
+              "plain geoid headers carry no vintage, so --year 2010 reconciles but exits 3, not 0, "
+              "because the tool could not tell  <-- pinned defect")
         check("vintage: not verified" in out and "2010 is your claim, not a finding" in out,
               "and the report says the vintage was not verified  <-- pinned defect")
         check("RECONCILED (vintage not verified): every block" in out,
@@ -1132,17 +1139,17 @@ def self_test():
               "a block given district 0 is refused on the command line, not reconciled with a "
               "phantom district  <-- pinned defect")
         code, out, err = run(base + ["--assignment", f_bigdist])
-        check(code == 0 and "RECONCILED" in out,
+        check(code == EXIT_UNVERIFIED and "RECONCILED" in out,
               "a district label of 5000 digits reconciles and does not end in a traceback  "
               "<-- pinned defect")
 
         code, out, err = run(base + ["--assignment", f_assign, "--control-total", "730"])
-        check(code == 0 and "extract 730 / control 730" in out, "a matching control total passes")
+        check(code == EXIT_UNVERIFIED and "extract 730 / control 730" in out, "a matching control total passes")
         code, out, err = run(base + ["--assignment", f_assign, "--control-total", "7300"])
         check(code == 1 and "CONTROL" in out, "a wrong control total exits 1")
 
         code, out, err = run(base + ["--parts", f_parts])
-        check(code == 0 and "RECONCILED" in out,
+        check(code == EXIT_UNVERIFIED and "RECONCILED" in out,
               "pieces that cover every block reconcile, including the water block the "
               "centroid rule lost")
         check("blocks split across districts: 2, holding 230 total" in out and
@@ -1164,7 +1171,7 @@ def self_test():
               "--out without --apply is a usage error and writes nothing")
         code, out, err = run(base + ["--assignment", f_assign, "--out", o1, "--apply"])
         written = slurp(o1)
-        check(code == 0 and written == (b"district,blocks,total,arealand\n"
+        check(code == EXIT_UNVERIFIED and written == (b"district,blocks,total,arealand\n"
                                         b"1,2,300,3000\n2,4,430,8100\n"),
               "--apply writes the district table, with LF line ends on every host")
         check("wrote " in out and o1 in out, "and says what it wrote")
@@ -1184,7 +1191,7 @@ def self_test():
         code, out, err = run(base + ["--parts", f_parts, "--out", o1, "--assign-out", o2,
                                      "--apply"])
         assigned = slurp(o2)
-        check(code == 0 and assigned == (
+        check(code == EXIT_UNVERIFIED and assigned == (
             ("geoid,district\n" + "".join("%s,%s\n" % (k, v) for k, v in sorted(
                 [(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "1")]))).encode()),
             "--assign-out writes the largest-overlap assignment, sorted by GEOID")
@@ -1192,7 +1199,7 @@ def self_test():
         check(code == 64, "--assign-out also needs --apply")
         o5 = os.path.join(tmp, "only-assigned.csv")
         code, out, err = run(base + ["--parts", f_parts, "--assign-out", o5, "--apply"])
-        check(code == 0 and os.path.exists(o5) and not os.path.exists(o1.replace(
+        check(code == EXIT_UNVERIFIED and os.path.exists(o5) and not os.path.exists(o1.replace(
             "districts", "never-made")) and "districts.csv" not in out,
               "--assign-out alone writes the assignment and no district table")
         f_sblocks = put("sort-blocks.csv", "geoid,total\n%s,4\n%s,3\n%s,2\n%s,1\n" %
@@ -1203,7 +1210,7 @@ def self_test():
         o7 = os.path.join(tmp, "sorted-assigned.csv")
         code, out, err = run(["--blocks", f_sblocks, "--year", "2020", "--county", "99001", "--trust-year",
                               "--parts", f_sparts, "--out", o6, "--assign-out", o7, "--apply"])
-        check(code == 0 and slurp(o6) == b"district,blocks,total\n1,1,1\n2,1,2\n10,1,3\nA,1,4\n",
+        check(code == EXIT_UNVERIFIED and slurp(o6) == b"district,blocks,total\n1,1,1\n2,1,2\n10,1,3\nA,1,4\n",
               "--out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given "
               "as A, 10, 2, 1  <-- pinned defect")
         check(slurp(o7) == ("geoid,district\n%s,1\n%s,2\n%s,10\n%s,A\n" %
@@ -1211,7 +1218,7 @@ def self_test():
               "--assign-out sorts by GEOID however the pieces were ordered  <-- pinned defect")
         # the assignment that --assign-out wrote goes back through the check
         code, out, err = run(base + ["--assignment", o2])
-        check(code == 0, "and the file it wrote reconciles when read back as an assignment")
+        check(code == EXIT_UNVERIFIED, "and the file it wrote reconciles when read back as an assignment")
 
         # --- formula guard on the written files
         def formulas(path):
@@ -1229,7 +1236,7 @@ def self_test():
         fbase = ["--blocks", f_fblocks, "--year", "2020", "--county", "99001", "--trust-year"]
         code, out, err = run(fbase + ["--parts", f_fparts, "--out", o10, "--assign-out", o11,
                                       "--apply"])
-        check(code == 0 and "RECONCILED" in out and err == "",
+        check(code == EXIT_UNVERIFIED and "RECONCILED" in out and err == "",
               "an overlay whose district labels start with =, +, -, @, a tab, a carriage return "
               "and an apostrophe reconciles and writes both files")
         check(slurp(o10) == (b"district,blocks,total,'=sum\n''=C,1,50,3000\n'+D,1,350,4000\n"
@@ -1247,7 +1254,7 @@ def self_test():
               "and the block and count columns are bare numbers with no apostrophe")
         o12 = os.path.join(tmp, "formula-districts-2.csv")
         code, out, err = run(fbase + ["--assignment", o11, "--out", o12, "--apply"])
-        check(code == 0 and "RECONCILED" in out and slurp(o12) == slurp(o10),
+        check(code == EXIT_UNVERIFIED and "RECONCILED" in out and slurp(o12) == slurp(o10),
               "the guarded --assign-out reads back as --assignment, gives the same district "
               "table byte for byte, and no label collapses into another  <-- pinned defect")
         check("  =A  " in out and "  '=C " in out and "'=A" not in out and "''=C" not in out,
@@ -1264,7 +1271,7 @@ def self_test():
         code, out, err = run(["--blocks", f_rb, "--parts", f_rp, "--year", "2020", "--county",
                               "99001", "--trust-year", "--out", o13, "--assign-out", o14,
                               "--apply"])
-        check(code == 0 and slurp(o13) == (b"district,blocks,total\n'-2,1,20\n'=SUM(A1),1,100\n"
+        check(code == EXIT_UNVERIFIED and slurp(o13) == (b"district,blocks,total\n'-2,1,20\n'=SUM(A1),1,100\n"
                                            b"Ward 3,1,3\n") and
               slurp(o14) == ("geoid,district\n%s,'=SUM(A1)\n%s,'-2\n%s,Ward 3\n"
                              % (g0, g1, g2)).encode(),
@@ -1346,7 +1353,7 @@ def self_test():
         check(code == 2 and "no 'pop' column" in err, "a --measure the extract lacks exits 2")
         code, out, err = run(base + ["--assignment", f_assign, "--measure", "arealand",
                                      "--control-total", "11100"])
-        check(code == 0 and "arealand       extract 11100 / control 11100" in out,
+        check(code == EXIT_UNVERIFIED and "arealand       extract 11100 / control 11100" in out,
               "a --measure naming another count column reconciles and checks the control on it")
         code, out, err = run(base[:1] + [put("w.csv", "geoid,total\n%s,x\n" % G1)] + base[2:] +
                              ["--assignment", f_assign])
@@ -1406,7 +1413,7 @@ def self_test():
 
     pcode, pout, perr = proc(base + ["--assignment", f_assign, "--out", o4, "--apply"])
     pwrote = slurp(o4)
-    check(pcode == 0 and "RECONCILED" in pout and pwrote == written,
+    check(pcode == EXIT_UNVERIFIED and "RECONCILED" in pout and pwrote == written,
           "the real command line reconciles and writes the same bytes as the in-process run")
     pcode, pout, perr = proc(base + ["--assignment", f_lost, "--out", o4, "--apply"])
     check(pcode == 1 and "REFUSED" in pout, "the real command line exits 1 on a refusal")
@@ -1418,7 +1425,7 @@ def self_test():
           "the real command line refuses --ap with exit 2 and writes nothing  <-- pinned defect")
     f_accent = put("caf\u00e9.csv", assign_text)
     pcode, pout, perr = proc(base + ["--assignment", f_accent])
-    check(pcode == 0 and "caf\\xe9.csv" in pout,
+    check(pcode == EXIT_UNVERIFIED and "caf\\xe9.csv" in pout,
           "a file with an accent in its name reconciles through a strict ASCII stdout  "
           "<-- pinned defect")
     pcode, pout, perr = proc(["--blocks", f_blocks])
