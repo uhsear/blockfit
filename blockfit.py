@@ -45,6 +45,8 @@ DEFAULT_MEASURE = "total"
 SAMPLE = 5            # example GEOIDs shown per reason; the counts are always exact
 DIGITS = "0123456789"
 RESERVED_COLUMNS = ("district", "blocks")   # the summary CSV names its own
+# A spreadsheet runs a cell that starts with one of these as a formula (OWASP, CSV Injection).
+FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -144,6 +146,27 @@ def max_overlap(pieces):
             if ranked[1][0] == ranked[0][0]:
                 ties.append(geoid)
     return assign, {"split": split, "ties": sorted(ties), "empty": empty}
+
+
+def cell(value):
+    """A CSV text cell that a spreadsheet will not run as a formula. Numbers pass unchanged.
+
+    A text starting with a character in FORMULA_LEADS gets one apostrophe in front. So does a
+    text that starts with apostrophes and then such a character, so that uncell(cell(x)) == x
+    for every text x: without it "=x" and "'=x" would both read back as "=x".
+    """
+    if not isinstance(value, str):
+        return value
+    if value[:1] in FORMULA_LEADS or (value[:1] == "'" and value.lstrip("'")[:1] in FORMULA_LEADS):
+        return "'" + value
+    return value
+
+
+def uncell(value):
+    """The inverse of cell: drop the one apostrophe that cell added, and nothing else."""
+    if value[:1] == "'" and value.lstrip("'")[:1] in FORMULA_LEADS:
+        return value[1:]
+    return value
 
 
 def safe(text):
@@ -360,11 +383,12 @@ def cell_geoid(cells, index, label, line):
 
 
 def cell_district(cells, index, label, line):
+    """The district label in a cell. A leading apostrophe that write_csv added is removed."""
     district = cells[index].strip()
     if district == "" or not is_printable_ascii(district):
         raise InputError("%s line %d: the district is empty or not printable ASCII" %
                          (label, line))
-    return district
+    return uncell(district)
 
 
 def load_blocks(header, body, measure, label):
@@ -425,10 +449,12 @@ def load_parts(header, body, label):
 
 
 def write_csv(path, header, rows):
+    """Write the CSV. Every text cell goes through cell(), so no cell is a formula."""
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, lineterminator="\n")
-        writer.writerow(header)
-        writer.writerows(rows)
+        writer.writerow([cell(name) for name in header])
+        for row in rows:
+            writer.writerow([cell(value) for value in row])
 
 
 def same_file(left, right):
@@ -839,6 +865,13 @@ def self_test():
            "a blank district is refused, not read as district ''", InputError)
     raises(lambda: assignment_of("geoid,district\n%s,D\u00e9\n" % G1),
            "a non-ASCII district is refused", InputError)
+    raises(lambda: assignment_of("geoid,district\n%s,＝A\n" % G1),
+           "a full-width equals sign in a district is refused as non-ASCII, so OWASP's full-width "
+           "formula characters cannot reach the output", InputError)
+    raises(lambda: assignment_of("geoid,district\n%s,A\tB\n" % G1),
+           "a tab inside a district is refused as not printable", InputError)
+    raises(lambda: parse(("geoid,＝total\n%s,1\n" % G1).encode("utf-8"), "t"),
+           "and so is a full-width formula character in a column name", InputError)
     check(assignment_of("geoid,district\n%s,nan\n%s,01\n%s,1\n" % (G1, G2, G3))[0] ==
           {G1: "nan", G2: "01", G3: "1"},
           "documented limit: nan is a district of its own, and 01 and 1 are two districts")
@@ -877,6 +910,43 @@ def self_test():
     zrep = reconcile(zblocks, zcols, "total", {z1: "1", z2: "1"}, "2020", "09999", (None, None))
     check(zrep["ok"] and zrep["districts"][0][1]["total"] == 7 and z1.startswith("09"),
           "a state FIPS that starts with 0 survives as text and the extract reconciles")
+
+    # ---- the formula guard: a text cell that starts with =, +, -, @, tab, CR or LF
+    for lead, name in (("=", "an equals sign"), ("+", "a plus sign"), ("-", "a minus sign"),
+                       ("@", "an at sign"), ("\t", "a tab"), ("\r", "a carriage return"),
+                       ("\n", "a line feed")):
+        check(cell(lead + "x") == "'" + lead + "x",
+              "a text cell that starts with %s gets one apostrophe in front  <-- pinned defect"
+              % name)
+        check(uncell(cell(lead + "x")) == lead + "x",
+              "and reading it back removes exactly that apostrophe, for %s" % name)
+    check(cell("plain") == "plain" and cell("") == "" and cell("a=b") == "a=b"
+          and cell("a-1") == "a-1" and cell("1-2") == "1-2",
+          "a text that does not start with a formula character is left alone, whatever it holds")
+    check(cell(7) == 7 and type(cell(7)) is int and cell(0) == 0 and cell(-5) == -5
+          and type(cell(-5)) is int,
+          "a number is not a text cell and stays a number, so a count column stays numeric")
+    check(cell("'abc") == "'abc" and cell("'") == "'" and cell("''") == "''",
+          "an apostrophe that is not followed by a formula character is a plain label")
+    check(cell("'=x") == "''=x" and cell("''-x") == "'''-x",
+          "a label that is itself an apostrophe and a formula character gets a second "
+          "apostrophe, so it is not mistaken for an escaped one  <-- pinned defect")
+    check(uncell("'abc") == "'abc" and uncell("'") == "'" and uncell("=x") == "=x"
+          and uncell("''=x") == "'=x" and uncell("'=x") == "=x",
+          "uncell removes one apostrophe only when a formula character follows the apostrophes")
+    labels = ["=A", "+1", "-1", "@x", "\tt", "\rr", "\nn", "'=C", "''=C", "'", "''", "'a", "a'",
+              "'+", "'-1", "a=b", "", "=", "-", "''@", "'\t"]
+    check(all(uncell(cell(text)) == text for text in labels),
+          "uncell(cell(x)) gives x back for 21 awkward labels, apostrophes included  "
+          "<-- pinned defect")
+    check(len(set(cell(text) for text in labels)) == len(labels),
+          "and no two of those labels are written as the same text")
+    check(cell_district(["'=A"], 0, "t", 1) == "=A" and cell_district([" '-1 "], 0, "t", 1) == "-1"
+          and cell_district(["''=A"], 0, "t", 1) == "'=A" and cell_district(["'a"], 0, "t", 1) == "'a",
+          "a district cell is stripped of its whitespace and of the one apostrophe write_csv adds")
+    check(cell_district(["\t=A"], 0, "t", 1) == "=A" and cell_district(["\r@A"], 0, "t", 1) == "@A",
+          "a leading tab or carriage return is stripped on read, so the formula character it hid "
+          "is then guarded on write")
 
     # ---- the files for the command line half
     tmp = tempfile.mkdtemp(prefix="blockfit-")
@@ -1074,6 +1144,47 @@ def self_test():
         # the assignment that --assign-out wrote goes back through the check
         code, out, err = run(base + ["--assignment", o2])
         check(code == 0, "and the file it wrote reconciles when read back as an assignment")
+
+        # --- formula guard on the written files
+        def formulas(path):
+            """Every text cell in the CSV at path that a spreadsheet would run as a formula."""
+            reader = csv.reader(io.StringIO(slurp(path).decode("utf-8"), newline=""))
+            return [c for row in reader for c in row if c[:1] in FORMULA_LEADS]
+
+        f_fblocks = put("formula-blocks.csv", block_text.replace("arealand", "=sum"))
+        f_fparts = put("formula-parts.csv", "geoid,district,area\n" + "".join(
+            "%s,%s,1\n" % pair for pair in (
+                (G1, "=A"), (G2, "-B"), (G3, "''=C"), (G4, "+D"), (G5, '"\r@E"'),
+                (G6, "\t=F"))))
+        o10 = os.path.join(tmp, "formula-districts.csv")
+        o11 = os.path.join(tmp, "formula-assigned.csv")
+        fbase = ["--blocks", f_fblocks, "--year", "2020", "--county", "99001"]
+        code, out, err = run(fbase + ["--parts", f_fparts, "--out", o10, "--assign-out", o11,
+                                      "--apply"])
+        check(code == 0 and "RECONCILED" in out and err == "",
+              "an overlay whose district labels start with =, +, -, @, a tab, a carriage return "
+              "and an apostrophe reconciles and writes both files")
+        check(slurp(o10) == (b"district,blocks,total,'=sum\n''=C,1,50,3000\n'+D,1,350,4000\n"
+                             b"'-B,1,200,2000\n'=A,1,100,1000\n'=F,1,30,600\n'@E,1,0,500\n"),
+              "--out puts one apostrophe before each district label that starts with a formula "
+              "character, and before a count column named =sum  <-- pinned defect")
+        check(slurp(o11) == (("geoid,district\n%s,'=A\n%s,'-B\n%s,''=C\n%s,'+D\n%s,'@E\n%s,'=F\n"
+                              % (G1, G2, G3, G4, G5, G6)).encode()),
+              "--assign-out guards the district column too, and leaves the geoid column and the "
+              "header alone  <-- pinned defect")
+        check(formulas(o10) == [] and formulas(o11) == [],
+              "no cell in either file starts with a formula character")
+        check(all(is_digits(c) for row in list(csv.reader(io.StringIO(
+            slurp(o10).decode("utf-8"), newline="")))[1:] for c in row[1:]),
+              "and the block and count columns are bare numbers with no apostrophe")
+        o12 = os.path.join(tmp, "formula-districts-2.csv")
+        code, out, err = run(fbase + ["--assignment", o11, "--out", o12, "--apply"])
+        check(code == 0 and "RECONCILED" in out and slurp(o12) == slurp(o10),
+              "the guarded --assign-out reads back as --assignment, gives the same district "
+              "table byte for byte, and no label collapses into another  <-- pinned defect")
+        check("  =A  " in out and "  '=C " in out and "'=A" not in out and "''=C" not in out,
+              "and the report shows the real labels, =A and '=C, not the escaped ones")
+        check(formulas(o12) == [], "and the second table is guarded as well")
 
         # --- usage errors
         def usage(argv, label):

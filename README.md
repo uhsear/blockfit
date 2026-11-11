@@ -81,6 +81,12 @@ PASS  a GEOID10 extract against --year 2020 is refused  <-- pinned defect
 ...
 PASS  an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect
 ...
+PASS  a text cell that starts with an equals sign gets one apostrophe in front  <-- pinned defect
+...
+PASS  a label that is itself an apostrophe and a formula character gets a second apostrophe, so it is not mistaken for an escaped one  <-- pinned defect
+...
+PASS  uncell(cell(x)) gives x back for 21 awkward labels, apostrophes included  <-- pinned defect
+...
 PASS  a run without --apply writes nothing at all  <-- pinned defect
 ...
 PASS  and the report says the vintage was not verified  <-- pinned defect
@@ -97,6 +103,12 @@ PASS  a closed pipe exits 2 and the CSV is not written  <-- pinned defect
 ...
 PASS  a real closed pipe exits 2, not the interpreter's 120, and writes no file  <-- pinned defect
 ...
+PASS  --out puts one apostrophe before each district label that starts with a formula character, and before a count column named =sum  <-- pinned defect
+...
+PASS  --assign-out guards the district column too, and leaves the geoid column and the header alone  <-- pinned defect
+...
+PASS  the guarded --assign-out reads back as --assignment, gives the same district table byte for byte, and no label collapses into another  <-- pinned defect
+...
 PASS  --out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given as A, 10, 2, 1  <-- pinned defect
 ...
 PASS  an extract one person ABOVE the control total is refused too, not only one below  <-- pinned defect
@@ -108,14 +120,15 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-176 assertions, 0 failed
+210 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 176 assertions pass
+The block is abridged. `...` marks each place where lines are left out. The same 210 assertions pass
 on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
-Ubuntu with Python 3.12. I did not run Python 3.11. The full output on
-Windows and the full output on Ubuntu are byte for byte identical apart from line ends.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (800 statements, 170 branches,
+Ubuntu with Python 3.12.3. I did not run Python 3.11. The full output on
+Windows (3.13) and the full output on Ubuntu are byte for byte identical apart from the first line
+of the Ubuntu capture, which is the `python3 --version` line I printed before the run.
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (847 statements, 180 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -311,6 +324,46 @@ current directory.
 writes `geoid,district`, sorted by GEOID. Both use LF line ends on every host, so two runs on the
 same inputs produce the same bytes.
 
+### Spreadsheet formulas
+
+A spreadsheet runs a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return as a
+formula. OWASP's CSV Injection page lists those characters, and a line feed too, and names one
+mitigation: put a single quote in front of the cell. A district label comes from your files, and
+so does the name of a count column, so blockfit does that for every text cell it writes. This
+includes the header row. Numbers are not text and are written as they are, so the block and count
+columns stay numeric.
+
+```
+$ python blockfit.py --blocks b.csv --parts p.csv --year 2020 --county 99001 --out o.csv --assign-out a.csv --apply
+$ cat o.csv
+district,blocks,total
+'-2,1,20
+'=SUM(A1),1,100
+Ward 3,1,3
+$ cat a.csv
+geoid,district
+990010001001000,'=SUM(A1)
+990010001001001,'-2
+990010001001002,Ward 3
+```
+
+blockfit reads its own `--assign-out` file back as `--assignment`, so a district label with the
+apostrophe is read as the label without it. The rule is exact. blockfit removes one apostrophe
+from a label only when the apostrophes at the front are followed by one of those characters. A
+label that is itself an apostrophe and then `=`, such as `'=C`, is written with a second
+apostrophe (`''=C`), so it does not read back as `=C`. The self-test pins this round trip on seven
+leading characters and on 21 awkward labels, and runs `--assign-out` into `--assignment` into
+`--out` to show that the second district table equals the first byte for byte.
+The reading rule applies to a `--parts` file too, because both go through one function. A label
+you wrote as `'=C` in either input is read as `=C`. Write it as `''=C` to keep the apostrophe.
+
+A tab, a carriage return or a line feed cannot reach a label or a column name. A leading one is
+stripped when the file is read, and one inside the text is refused as not printable ASCII.
+The self-test gives the guard those characters directly. It also shows a tab and a carriage
+return stripped from a label, so that the formula character they hid is guarded afterwards. The
+full-width variants of `=`, `+`, `-` and `@` that OWASP also lists are not ASCII, and blockfit
+refuses a non-ASCII label or column name.
+
 ```
 district,blocks,total,arealand
 1,2,300,3000
@@ -392,7 +445,14 @@ and not only people.
   districts. A missing value written as `nan`, `None`, `0` or `NULL` is a district of its own. Such
   an assignment reconciles with exit 0 and a phantom row in the table, so read the district table.
   blockfit does not know which labels are valid. A label that starts with `=`, `+`, `-` or `@` is
-  written as it is, so a spreadsheet may read it as a formula.
+  written with an apostrophe in front (see Spreadsheet formulas).
+- **The apostrophe is visible.** The guard changes the text. A spreadsheet that opens the CSV shows
+  the apostrophe, because it is part of the cell, and blockfit's own reader removes it. OWASP warns
+  that Excel can remove escape characters when it saves a CSV and opens it again, which would make
+  a cell active again. I did not open the files in Excel, LibreOffice or Google Sheets for this
+  release. The test is that no written cell starts with one of the seven characters.
+- **The report is not guarded.** The district labels printed to stdout are written as they are,
+  because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
 - **Areas are trusted.** `--parts` areas are not checked for units or projection. A mixed set gives
   a wrong largest part and no warning. Duplicate piece rows (the same GEOID, district and area)
   are summed as separate pieces and are not detected, so they can change which district wins. The
@@ -417,6 +477,10 @@ and not only people.
   `normcase`. It does not follow hard links, NTFS alternate data streams or 8.3 short names. It is
   case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
   point `--out` at a hard link of an input.
+- **The guard was mutation tested by hand.** For this release I made four changes to the guard and
+  ran the self-test on each: no guard on a data row (6 failures), none on the header (3), no
+  removal on read (5), and no second apostrophe for `'=C` (7). All turned the self-test red. I did
+  not rerun the wider sweep described next.
 - **Mutants the self-test cannot tell apart.** I ran a mutation sweep of the code above
   `self_test()` on an earlier build, before the vintage line and the `district_key` change. Two
   surviving mutants are equivalent. A further dozen or so are cosmetic or sit on a boundary that
@@ -452,7 +516,7 @@ and not only people.
 
 ## Sources checked
 
-Read on 2026-10-22.
+Read on 2026-10-22, except where a line says otherwise.
 
 - Census Bureau, geographic identifiers (`census.gov/programs-surveys/geography/guidance/geo-identifiers.html`):
   a block GEOID is state + county + tract + block, 2 + 3 + 6 + 4 digits, 15 in all; some blocks
@@ -472,6 +536,13 @@ Read on 2026-10-22.
   wording quoted above.
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
   and the geographic coordinates warning.
+- OWASP, CSV Injection (`owasp.org/www-community/attacks/CSV_Injection`, read on 2026-11-11 at
+  its new address `community.owasp.org/attacks/CSV_Injection`): the leading characters `=`, `+`,
+  `-`, `@`, tab (0x09), carriage return (0x0D), line feed (0x0A) and the full-width `=`, `+`, `-`
+  and `@`; the suggestion to prepend each cell field with a single quote; and the warning that
+  Excel may remove quotes or escape characters when a file is saved and opened again. The page
+  also suggests a tab inside a quoted field for Excel. blockfit uses the apostrophe, because it
+  can strip an apostrophe on read without guessing.
 
 I did not read anything about SQL Server, PROJ or FEMA for this tool, because blockfit relies on
 none of them.
