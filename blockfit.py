@@ -199,8 +199,8 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
     assign  geoid -> district
     tags    (extract_tag, assignment_tag): 10, 20 or None, read from a GEOID10 or GEOID20 header
     control optional population the extract itself must equal
-    require_tag  refuse when neither header carries a GEOID10 or GEOID20 tag, because then
-                 nothing in the files says which vintage they are
+    require_tag  refuse unless both headers carry a GEOID10 or GEOID20 tag, because an
+                 untagged file says nothing about which vintage it is
 
     Returns a dict. report["ok"] is True only when report["reasons"] is empty.
     """
@@ -272,13 +272,13 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
             "and not a district. If a label is a real district, rename it in the input file" %
             (sum(districts[d]["blocks"] for d in nulls), sample(nulls),
              sum(districts[d][measure] for d in nulls), measure))
-    verified = any(tag is not None for tag in tags)
+    verified = all(tag is not None for tag in tags)
     if require_tag and not verified:
         reasons.append(
-            "UNVERIFIED-VINTAGE: neither header carries a GEOID10 or GEOID20 tag, so nothing in "
-            "the files says they are %s blocks. --year %s is your claim, and blockfit cannot "
-            "check it. Rename a geoid header to geoid%d if it is true, or pass --trust-year to "
-            "accept the claim" % (year, year, wanted))
+            "UNVERIFIED-VINTAGE: not every header carries a GEOID10 or GEOID20 tag, so nothing in "
+            "the untagged file says it holds %s blocks. --year %s is your claim for it, and "
+            "blockfit cannot check it. Rename each plain geoid header to geoid%d if it is true, "
+            "or pass --trust-year to accept the claim" % (year, year, wanted))
     assigned_totals = dict((col, sum(row[col] for row in districts.values())) for col in columns)
     return {
         "ok": not reasons,
@@ -304,8 +304,8 @@ def render(report, names, year, county, parts_info=None):
     lines = ["blockfit: %s with %s %s" % (safe(names[0]), names[2], safe(names[1])),
              "  county %s, %s blocks, count column '%s'" % (county, year, report["measure"])]
     if not report["vintage_verified"]:
-        lines.append("  vintage: not verified. Neither header carries a GEOID10 or GEOID20 tag, "
-                     "so %s is your claim, not a finding." % year)
+        lines.append("  vintage: not verified. Not every header carries a GEOID10 or GEOID20 tag, "
+                     "so %s is your claim for the plain file, not a finding." % year)
     lines += ["",
               "  blocks in the extract       : %d" % report["extract_blocks"],
               "  blocks in the assignment    : %d" % report["assign_blocks"],
@@ -506,7 +506,7 @@ def _parse(argv):
                         help="Count column that means people (default: %(default)s).")
     parser.add_argument("--control-total", help="The extract's --measure must equal this number.")
     parser.add_argument("--trust-year", action="store_true",
-                        help="Accept --year when neither file has a GEOID10 or GEOID20 header. "
+                        help="Accept --year when either file lacks a GEOID10 or GEOID20 header. "
                         "Without it such a run is refused, because blockfit cannot check the year.")
     parser.add_argument("--out", help="Path for the district summary CSV. Needs --apply.")
     parser.add_argument("--assign-out", help="Path for the block-to-district CSV that --parts "
@@ -817,8 +817,16 @@ def self_test():
           and not strict["vintage_verified"],
           "with require_tag, two plain headers are refused because the vintage cannot be checked  "
           "<-- pinned defect")
-    check(rec(GOOD, tags=(None, 20), require_tag=True)["ok"] and rec(GOOD)["ok"],
-          "one tag is enough for require_tag, and the pure default does not require one")
+    half = rec(GOOD, tags=(None, 20), require_tag=True)
+    check(not half["ok"] and "UNVERIFIED-VINTAGE" in text_of(half) and not half["vintage_verified"]
+          and rec(GOOD, tags=(20, None), require_tag=True)["ok"] is False,
+          "with require_tag, one plain header is refused too, because that file's vintage is "
+          "unchecked  <-- pinned defect")
+    check(rec(GOOD, tags=(20, 20), require_tag=True)["ok"] and rec(GOOD)["ok"],
+          "two tags satisfy require_tag, and the pure default does not require one")
+    check(rec(GOOD, tags=(None, 20))["ok"] and not rec(GOOD, tags=(None, 20))["vintage_verified"],
+          "without require_tag, one plain header reconciles but is not marked verified  "
+          "<-- pinned defect")
 
     check(rec(GOOD, control=730)["ok"], "an extract equal to the control total passes")
     ctrl = rec(GOOD, control=731)
@@ -1042,6 +1050,7 @@ def self_test():
     f_tag10 = put("tag10.csv", assign_text.replace("geoid", "geoid10", 1))
     f_bigdist = put("bigdist.csv", assign_text.replace(",1\n", ",%s\n" % ("7" * 5000)))
     f_tag20 = put("tag20.csv", assign_text.replace("geoid", "geoid20", 1))
+    f_tagblocks = put("tagblocks.csv", block_text.replace("geoid", "geoid20", 1))
     f_null = put("null-district.csv", assign_text.replace("%s,2\n" % G4, "%s,0\n" % G4))
     before = listing()
 
@@ -1107,7 +1116,9 @@ def self_test():
 
         code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
                               "--trust-year", "--assignment", f_tag10])
-        check(code == 0, "a GEOID10 assignment against --year 2010 reconciles")
+        check(code == EXIT_UNVERIFIED and "vintage: not verified" in out,
+              "a GEOID10 assignment against a plain extract and --year 2010 reconciles but exits 3, "
+              "because the extract's vintage is unchecked  <-- pinned defect")
         code, out, err = run(base + ["--assignment", f_tag10])
         check(code == 1 and "VINTAGE: the assignment header says GEOID10 but --year is 2020" in out,
               "and against --year 2020 it is refused  <-- pinned defect")
@@ -1116,7 +1127,7 @@ def self_test():
         check(code == 3 and EXIT_UNVERIFIED == 3 and "2010 blocks" in out,
               "plain geoid headers carry no vintage, so --year 2010 reconciles but exits 3, not 0, "
               "because the tool could not tell  <-- pinned defect")
-        check("vintage: not verified" in out and "2010 is your claim, not a finding" in out,
+        check("vintage: not verified" in out and "2010 is your claim for the plain file, not a finding" in out,
               "and the report says the vintage was not verified  <-- pinned defect")
         check("RECONCILED (vintage not verified): every block" in out,
               "and the verdict line carries the same words, so a log that keeps only the verdict "
@@ -1132,9 +1143,17 @@ def self_test():
               "and --apply writes nothing for it  <-- pinned defect")
         code, out, err = run(["--blocks", f_blocks, "--year", "2020", "--county", "99001",
                               "--assignment", f_tag20])
+        check(code == 1 and "UNVERIFIED-VINTAGE" in out and "RECONCILED" not in out,
+              "one tagged header and one plain header, no --trust-year, exit 1, not a plain "
+              "RECONCILED with exit 0  <-- pinned defect")
+        code, out, err = run(["--blocks", f_tagblocks, "--year", "2020", "--county", "99001",
+                              "--assignment", f_tag20])
         check(code == 0 and "vintage: not verified" not in out and "RECONCILED: every block" in out,
-              "one header tag is enough to call the vintage checked, and the verdict says plain "
-              "RECONCILED")
+              "a tag on both headers is the only way to exit 0: the verdict is plain RECONCILED")
+        code, out, err = run(base + ["--trust-year", "--assignment", f_tag20])
+        check(code == EXIT_UNVERIFIED and "RECONCILED (vintage not verified)" in out,
+              "and with --trust-year it exits 3 and the verdict carries the caveat  "
+              "<-- pinned defect")
         code, out, err = run(base + ["--assignment", f_null])
         check(code == 1 and "NULL-DISTRICT: 1 block(s)" in out and "RECONCILED" not in out,
               "a block given district 0 is refused on the command line, not reconciled with a "
