@@ -190,13 +190,15 @@ def sample(items):
 
 
 def reconcile(blocks, columns, measure, assign, year, county, tags,
-              repeated=(), conflicting=(), control=None):
+              repeated=(), conflicting=(), control=None, require_tag=False):
     """Decide whether the assignment reconciles to the extract. Pure: no I/O.
 
     blocks  geoid -> {column: int}, one entry per extract row
     assign  geoid -> district
     tags    (extract_tag, assignment_tag): 10, 20 or None, read from a GEOID10 or GEOID20 header
     control optional population the extract itself must equal
+    require_tag  refuse when neither header carries a GEOID10 or GEOID20 tag, because then
+                 nothing in the files says which vintage they are
 
     Returns a dict. report["ok"] is True only when report["reasons"] is empty.
     """
@@ -268,10 +270,17 @@ def reconcile(blocks, columns, measure, assign, year, county, tags,
             "and not a district. If a label is a real district, rename it in the input file" %
             (sum(districts[d]["blocks"] for d in nulls), sample(nulls),
              sum(districts[d][measure] for d in nulls), measure))
+    verified = any(tag is not None for tag in tags)
+    if require_tag and not verified:
+        reasons.append(
+            "UNVERIFIED-VINTAGE: neither header carries a GEOID10 or GEOID20 tag, so nothing in "
+            "the files says they are %s blocks. --year %s is your claim, and blockfit cannot "
+            "check it. Rename a geoid header to geoid%d if it is true, or pass --trust-year to "
+            "accept the claim" % (year, year, wanted))
     assigned_totals = dict((col, sum(row[col] for row in districts.values())) for col in columns)
     return {
         "ok": not reasons,
-        "vintage_verified": any(tag is not None for tag in tags),
+        "vintage_verified": verified,
         "reasons": reasons,
         "districts": sorted(districts.items(), key=lambda kv: district_key(kv[0])),
         "columns": list(columns),
@@ -494,6 +503,9 @@ def _parse(argv):
     parser.add_argument("--measure", default=DEFAULT_MEASURE,
                         help="Count column that means people (default: %(default)s).")
     parser.add_argument("--control-total", help="The extract's --measure must equal this number.")
+    parser.add_argument("--trust-year", action="store_true",
+                        help="Accept --year when neither file has a GEOID10 or GEOID20 header. "
+                        "Without it such a run is refused, because blockfit cannot check the year.")
     parser.add_argument("--out", help="Path for the district summary CSV. Needs --apply.")
     parser.add_argument("--assign-out", help="Path for the block-to-district CSV that --parts "
                         "produced. Needs --apply.")
@@ -583,7 +595,8 @@ def main(argv=None, out=None, err=None):
         return EXIT_IO
 
     report = reconcile(blocks, columns, measure, assign, args.year, args.county,
-                       (block_tag, tag), repeated, conflicting, control)
+                       (block_tag, tag), repeated, conflicting, control,
+                       require_tag=not args.trust_year)
     if parts_info is not None:
         parts_info["people"] = sum(blocks[g][measure] for g in parts_info["split"] if g in blocks)
     text = render(report, (args.blocks, other, "assignment" if parts_info is None else "parts"),
@@ -791,6 +804,14 @@ def self_test():
     check(not tag2["ok"] and "assignment header says GEOID10" in text_of(tag2),
           "and so is a GEOID10 assignment")
     check(rec(GOOD, tags=(20, 20))["ok"], "a GEOID20 header on both sides passes for 2020")
+
+    strict = rec(GOOD, require_tag=True)
+    check(not strict["ok"] and "UNVERIFIED-VINTAGE" in text_of(strict)
+          and not strict["vintage_verified"],
+          "with require_tag, two plain headers are refused because the vintage cannot be checked  "
+          "<-- pinned defect")
+    check(rec(GOOD, tags=(None, 20), require_tag=True)["ok"] and rec(GOOD)["ok"],
+          "one tag is enough for require_tag, and the pure default does not require one")
 
     check(rec(GOOD, control=730)["ok"], "an extract equal to the control total passes")
     ctrl = rec(GOOD, control=731)
@@ -1029,7 +1050,7 @@ def self_test():
         text = out.getvalue() if isinstance(out, io.StringIO) and not out.closed else ""
         return code, text, err.getvalue()
 
-    base = ["--blocks", f_blocks, "--year", "2020", "--county", "99001"]
+    base = ["--blocks", f_blocks, "--year", "2020", "--county", "99001", "--trust-year"]
 
     # ---- the whole command line must make no network call
     net_calls = []
@@ -1078,13 +1099,13 @@ def self_test():
         check(code == 1 and "REPEATED" in out, "a repeated block exits 1")
 
         code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
-                              "--assignment", f_tag10])
+                              "--trust-year", "--assignment", f_tag10])
         check(code == 0, "a GEOID10 assignment against --year 2010 reconciles")
         code, out, err = run(base + ["--assignment", f_tag10])
         check(code == 1 and "VINTAGE: the assignment header says GEOID10 but --year is 2020" in out,
               "and against --year 2020 it is refused  <-- pinned defect")
         code, out, err = run(["--blocks", f_blocks, "--year", "2010", "--county", "99001",
-                              "--assignment", f_assign])
+                              "--trust-year", "--assignment", f_assign])
         check(code == 0 and "2010 blocks" in out,
               "documented limit: plain geoid headers carry no vintage, so --year 2010 reconciles")
         check("vintage: not verified" in out and "2010 is your claim, not a finding" in out,
@@ -1092,7 +1113,17 @@ def self_test():
         check("RECONCILED (vintage not verified): every block" in out,
               "and the verdict line carries the same words, so a log that keeps only the verdict "
               "keeps the caveat  <-- pinned defect")
-        code, out, err = run(base + ["--assignment", f_tag20])
+        wrong = ["--blocks", f_blocks, "--year", "2010", "--county", "99001"]
+        code, out, err = run(wrong + ["--assignment", f_assign])
+        check(code == 1 and "UNVERIFIED-VINTAGE" in out and "RECONCILED" not in out,
+              "plain geoid headers and no --trust-year exit 1, so a wrong --year cannot exit 0  "
+              "<-- pinned defect")
+        unv = os.path.join(tmp, "unverified.csv")
+        code, out, err = run(wrong + ["--assignment", f_assign, "--out", unv, "--apply"])
+        check(code == 1 and not os.path.exists(unv) and "nothing written" in err,
+              "and --apply writes nothing for it  <-- pinned defect")
+        code, out, err = run(["--blocks", f_blocks, "--year", "2020", "--county", "99001",
+                              "--assignment", f_tag20])
         check(code == 0 and "vintage: not verified" not in out and "RECONCILED: every block" in out,
               "one header tag is enough to call the vintage checked, and the verdict says plain "
               "RECONCILED")
@@ -1170,7 +1201,7 @@ def self_test():
                        "geoid,district,area\n%s,A,1\n%s,10,1\n%s,2,1\n%s,1,1\n" % (G4, G3, G2, G1))
         o6 = os.path.join(tmp, "sorted-districts.csv")
         o7 = os.path.join(tmp, "sorted-assigned.csv")
-        code, out, err = run(["--blocks", f_sblocks, "--year", "2020", "--county", "99001",
+        code, out, err = run(["--blocks", f_sblocks, "--year", "2020", "--county", "99001", "--trust-year",
                               "--parts", f_sparts, "--out", o6, "--assign-out", o7, "--apply"])
         check(code == 0 and slurp(o6) == b"district,blocks,total\n1,1,1\n2,1,2\n10,1,3\nA,1,4\n",
               "--out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given "
@@ -1195,7 +1226,7 @@ def self_test():
                 (G6, "\t=F"))))
         o10 = os.path.join(tmp, "formula-districts.csv")
         o11 = os.path.join(tmp, "formula-assigned.csv")
-        fbase = ["--blocks", f_fblocks, "--year", "2020", "--county", "99001"]
+        fbase = ["--blocks", f_fblocks, "--year", "2020", "--county", "99001", "--trust-year"]
         code, out, err = run(fbase + ["--parts", f_fparts, "--out", o10, "--assign-out", o11,
                                       "--apply"])
         check(code == 0 and "RECONCILED" in out and err == "",
@@ -1222,6 +1253,22 @@ def self_test():
         check("  =A  " in out and "  '=C " in out and "'=A" not in out and "''=C" not in out,
               "and the report shows the real labels, =A and '=C, not the escaped ones")
         check(formulas(o12) == [], "and the second table is guarded as well")
+
+        # The README's formula example: the same bytes, so the quoted files are a real run.
+        g0, g1, g2 = "990010001001000", "990010001001001", "990010001001002"
+        f_rb = put("readme-b.csv", "geoid,total\n%s,100\n%s,20\n%s,3\n" % (g0, g1, g2))
+        f_rp = put("readme-p.csv", "geoid,district,area\n%s,=SUM(A1),1\n%s,-2,1\n%s,Ward 3,1\n"
+                   % (g0, g1, g2))
+        o13 = os.path.join(tmp, "readme-o.csv")
+        o14 = os.path.join(tmp, "readme-a.csv")
+        code, out, err = run(["--blocks", f_rb, "--parts", f_rp, "--year", "2020", "--county",
+                              "99001", "--trust-year", "--out", o13, "--assign-out", o14,
+                              "--apply"])
+        check(code == 0 and slurp(o13) == (b"district,blocks,total\n'-2,1,20\n'=SUM(A1),1,100\n"
+                                           b"Ward 3,1,3\n") and
+              slurp(o14) == ("geoid,district\n%s,'=SUM(A1)\n%s,'-2\n%s,Ward 3\n"
+                             % (g0, g1, g2)).encode(),
+              "the README's formula example writes exactly the two files the README shows")
 
         # --- usage errors
         def usage(argv, label):
@@ -1257,7 +1304,7 @@ def self_test():
         c_blocks = put("victim-blocks.csv", block_text)
         c_assign = put("victim-assign.csv", assign_text)
         c_parts = put("victim-parts.csv", parts_text)
-        cbase = ["--blocks", c_blocks, "--year", "2020", "--county", "99001"]
+        cbase = ["--blocks", c_blocks, "--year", "2020", "--county", "99001", "--trust-year"]
         usage(cbase + ["--assignment", c_assign, "--out", c_blocks, "--apply"],
               "--out equal to --blocks is a usage error, not an overwrite  <-- pinned defect")
         usage(cbase + ["--assignment", c_assign, "--out", c_assign, "--apply"],

@@ -23,7 +23,7 @@ blockfit takes the block extract and the assignment, and it refuses unless every
 one district, both files name the same blocks, and the district sums equal the extract.
 
 ```
-$ python blockfit.py --blocks blocks.csv --assignment centroid.csv --year 2020 --county 99001
+$ python blockfit.py --blocks blocks.csv --assignment centroid.csv --year 2020 --county 99001 --trust-year
 blockfit: blocks.csv with assignment centroid.csv
   county 99001, 2020 blocks, count column 'total'
   vintage: not verified. Neither header carries a GEOID10 or GEOID20 tag, so 2020 is your claim, not a finding.
@@ -44,7 +44,10 @@ REFUSED: 1 reason(s)
 ```
 
 The exit code is 1. County `99001` does not exist. Every number in this file comes from a synthetic
-fixture that `--self-test` builds, so you can run all of it without a download.
+fixture, so you can run all of it without a download. Most come from the fixture that `--self-test`
+builds. The two-file formula example under Output is a second, smaller fixture, and `--self-test`
+writes it too and compares the output byte for byte. `--trust-year` is explained under Usage: the two
+files here have plain `geoid` headers, so without it the run is also refused for an unverified year.
 
 ## The existing tool, and what it does well
 
@@ -73,12 +76,15 @@ blockfit self-test: no network, no census download, no arcpy
 PASS  an assignment missing the block whose centroid fell on water is refused and reports the 350 people it lost  <-- pinned defect
 ...
 PASS  the district sums add to 380, not the extract's 730, with no error from the arithmetic  <-- pinned defect
-...
 PASS  a block with no people missing from the assignment is refused although the people still add up  <-- pinned defect
 ...
 PASS  blocks missing on one side and extra on the other are called a vintage mismatch  <-- pinned defect
 ...
 PASS  a GEOID10 extract against --year 2020 is refused  <-- pinned defect
+...
+PASS  with require_tag, two plain headers are refused because the vintage cannot be checked  <-- pinned defect
+...
+PASS  an extract one person ABOVE the control total is refused too, not only one below  <-- pinned defect
 ...
 PASS  an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect
 ...
@@ -94,48 +100,45 @@ PASS  a run without --apply writes nothing at all  <-- pinned defect
 ...
 PASS  and the report says the vintage was not verified  <-- pinned defect
 PASS  and the verdict line carries the same words, so a log that keeps only the verdict keeps the caveat  <-- pinned defect
+PASS  plain geoid headers and no --trust-year exit 1, so a wrong --year cannot exit 0  <-- pinned defect
 ...
 PASS  a block given district 0 is refused on the command line, not reconciled with a phantom district  <-- pinned defect
-...
 PASS  a district label of 5000 digits reconciles and does not end in a traceback  <-- pinned defect
 ...
 PASS  --apply does NOT overwrite the table when the check refused  <-- pinned defect
 ...
 PASS  and still exits 1, because the extract is still wrong  <-- pinned defect
 ...
-PASS  --ap is refused by the parser with exit 2 and writes nothing  <-- pinned defect
-...
-PASS  a closed pipe exits 2 and the CSV is not written  <-- pinned defect
-...
-PASS  a real closed pipe exits 2, not the interpreter's 120, and writes no file  <-- pinned defect
+PASS  --out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given as A, 10, 2, 1  <-- pinned defect
 ...
 PASS  --out puts one apostrophe before each district label that starts with a formula character, and before a count column named =sum  <-- pinned defect
-...
 PASS  --assign-out guards the district column too, and leaves the geoid column and the header alone  <-- pinned defect
 ...
 PASS  the guarded --assign-out reads back as --assignment, gives the same district table byte for byte, and no label collapses into another  <-- pinned defect
 ...
-PASS  --out sorts whole numbers as numbers, then text: 1, 2, 10, A, from rows given as A, 10, 2, 1  <-- pinned defect
+PASS  --ap is refused by the parser with exit 2 and writes nothing  <-- pinned defect
 ...
-PASS  an extract one person ABOVE the control total is refused too, not only one below  <-- pinned defect
+PASS  a closed pipe exits 2 and the CSV is not written  <-- pinned defect
 ...
 PASS  the whole command line half made no network call
+...
+PASS  a real closed pipe exits 2, not the interpreter's 120, and writes no file  <-- pinned defect
 ...
 PASS  the file imports only the standard library: no arcpy, no third party package
 ...
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-215 assertions, 0 failed
+220 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 215 assertions pass
+The block is abridged. `...` marks each place where lines are left out. The same 220 assertions pass
 on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
 which is the `python3 --version` line I printed before the run.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (862 statements, 182 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (882 statements, 184 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
@@ -159,15 +162,16 @@ every code path. It proves that none of the runs it makes touched the network.
 ## Quick start
 
 ```
-python blockfit.py --blocks blocks.csv --assignment assign.csv --year 2020 --county 99001
-python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001
+python blockfit.py --blocks blocks.csv --assignment assign.csv --year 2020 --county 99001 --trust-year
+python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001 --trust-year
 ```
 
-Each prints the district table and the reconciliation, and writes nothing.
+Each prints the district table and the reconciliation, and writes nothing. Drop `--trust-year` when
+one of the files has a `geoid20` or `geoid10` header.
 
 ```
 python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001 \
-    --out districts.csv --assign-out assigned.csv --apply
+    --trust-year --out districts.csv --assign-out assigned.csv --apply
 ```
 
 ## Usage
@@ -181,6 +185,7 @@ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 9
 | `--county` | none | Five digits, state FIPS then county FIPS. Required. There is no default. |
 | `--measure` | `total` | The count column that means people. |
 | `--control-total` | off | The extract's `--measure` must equal this whole number. |
+| `--trust-year` | off | Accept `--year` when neither file has a `GEOID10` or `GEOID20` header. Without it, such a run is refused, because nothing in the files says which vintage they are. |
 | `--out` | none | Path for the district summary CSV. Needs `--apply`. |
 | `--assign-out` | none | Path for the block-to-district CSV that `--parts` produced. Needs `--apply`. |
 | `--apply` | off | Write `--out` and `--assign-out`. Without it blockfit writes no file. `--self-test` is the one exception (see Output). |
@@ -224,9 +229,12 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
    `NULL-DISTRICT` refusal. GIS tools write those labels for a block that no district holds, so
    the table would carry a phantom district. If one is a real district, rename it in your file.
 
-When neither file carries a `GEOID10` or `GEOID20` tag the vintage is not verified, and a run that
-passes says so on the verdict line too: `RECONCILED (vintage not verified): ...`. The exit code is
-still 0, because every other check passed. A tagged file gives the plain `RECONCILED:` line.
+9. **The vintage must be checkable.** When neither file carries a `GEOID10` or `GEOID20` tag,
+   nothing in the files says which decade they are, and `--year` is only your claim. That is an
+   `UNVERIFIED-VINTAGE` refusal, with exit 1. `pl94` writes a plain `geoid` header, so this is the
+   common case. If you know the year, pass `--trust-year`. The run then says so in the report and
+   on the verdict line, `RECONCILED (vintage not verified): ...`, and exits 0 when every other
+   check passes. A tagged file gives the plain `RECONCILED:` line and needs no flag.
 
 The district sums are printed beside the extract sums for every count column. They are equal when
 no block is lost, so equal sums are needed for `RECONCILED`. They are not enough. A repeated block,
@@ -263,7 +271,7 @@ in the same district are added. The block goes to the district with the largest 
   the wrong one.
 
 ```
-$ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001
+$ python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001 --trust-year
 ...
   DISTRICT    BLOCKS        total     arealand
   1                3          330         3600
@@ -285,7 +293,7 @@ fixture that failed under the centroid rule reconciles.
 ## A vintage mismatch
 
 ```
-$ python blockfit.py --blocks blocks.csv --assignment old.csv --year 2020 --county 99001
+$ python blockfit.py --blocks blocks.csv --assignment old.csv --year 2020 --county 99001 --trust-year
 ...
 REFUSED: 1 reason(s)
   1. VINTAGE: 2 extract block(s) (350 total) are in no district and 2 assignment block(s) are not in the extract; 4 of 6 assignment blocks match. Census redraws blocks every decade, so these files describe different block sets. Both files must use the 2020 blocks, and blockfit cannot tell which one does not. Extract only: 990010001001003, 990010001001004. Assignment only: 990010001009100, 990010001009200
@@ -320,7 +328,7 @@ projection is the safe choice. blockfit does not check any of this.
 | Code | Meaning |
 |---|---|
 | 0 | The assignment reconciles to the extract. |
-| 1 | It does not. The reasons are printed. A failed `--self-test` also exits 1. |
+| 1 | It does not, or the vintage could not be checked and `--trust-year` was not given. The reasons are printed. A failed `--self-test` also exits 1. |
 | 2 | A file could not be read or is malformed, an output could not be written, or the report could not be written to stdout. argparse also exits 2 for a flag it does not know, such as `--ap`. |
 | 64 | Usage error found by blockfit: a missing `--blocks`, `--year` or `--county`, a bad value, both or neither of `--assignment` and `--parts`, `--assign-out` without `--parts`, an output without `--apply`, `--apply` with no output, an output that is also an input, or `--out` and `--assign-out` naming the same file. |
 
@@ -349,7 +357,7 @@ includes the header row. Numbers are not text and are written as they are, so th
 columns stay numeric.
 
 ```
-$ python blockfit.py --blocks b.csv --parts p.csv --year 2020 --county 99001 --out o.csv --assign-out a.csv --apply
+$ python blockfit.py --blocks b.csv --parts p.csv --year 2020 --county 99001 --trust-year --out o.csv --assign-out a.csv --apply
 $ cat o.csv
 district,blocks,total
 '-2,1,20
@@ -451,10 +459,12 @@ and not only people.
   or `GEOID20` tag, or when the two block sets differ. Two files with a plain `geoid` header on the
   wrong decade and identical block sets reconcile. A wrong `--year` given with consistent files
   reconciles. `--year` is a claim that blockfit cannot verify. pl94 writes a plain `geoid` header
-  for both vintages. When neither file carries a tag, the report says "vintage: not verified" and
-  that the year is your claim, and the verdict line reads `RECONCILED (vintage not verified)`. The
-  exit code stays 0. One tagged file is enough to drop both notes, and the tag is then checked on
-  that file only.
+  for both vintages, so without `--trust-year` a run on two plain files is refused with
+  `UNVERIFIED-VINTAGE` and exit 1. With `--trust-year` the report says "vintage: not verified" and
+  that the year is your claim, the verdict line reads `RECONCILED (vintage not verified)`, and the
+  exit code is 0. A job that passes `--trust-year` has accepted that claim. The exit code does not
+  carry the caveat; only the verdict line does. One tagged file is enough to drop both notes, and
+  the tag is then checked on that file only.
 - **The control total is trusted.** `--control-total` checks the extract against the number. It
   cannot check the number. A wrong control gives a wrong verdict.
 - **District labels are text.** A label is compared as text after trimming. `1` and `01` are two
@@ -478,6 +488,10 @@ and not only people.
   unit tests call `cell()` with them directly.
 - **The report is not guarded.** The district labels printed to stdout are written as they are,
   because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
+- **The no-district list is fixed.** A label such as `<Null>` (how an ArcGIS Pro table view shows a
+  null) or `NA` is not on it, so it reconciles as a real district. Read the district table.
+- **A trailing empty column is refused.** A CSV whose header ends in a comma, as some spreadsheet
+  exports do, exits 2 with `empty or non-ASCII column name`. Remove the column first.
 - **Areas are trusted.** `--parts` areas are not checked for units or projection. A mixed set gives
   a wrong largest part and no warning. Duplicate piece rows (the same GEOID, district and area)
   are summed as separate pieces and are not detected, so they can change which district wins. The
@@ -502,10 +516,13 @@ and not only people.
   `normcase`. It does not follow hard links, NTFS alternate data streams or 8.3 short names. It is
   case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
   point `--out` at a hard link of an input.
-- **The guard was mutation tested by hand.** For this release I made four changes to the guard and
-  ran the self-test on each: no guard on a data row (6 failures), none on the header (3), no
-  removal on read (5), and no second apostrophe for `'=C` (7). All turned the self-test red. I did
-  not rerun the wider sweep described next.
+- **The guard and the year check were mutation tested by hand.** For this release I made six changes and
+  ran the self-test on each: no guard on a data row in `write_csv` (7 failures), none on the
+  header (3), `return district` in place of `return uncell(district)` in `cell_district` (5), no
+  second apostrophe for `'=C` in `cell` (7), `--trust-year` ignored in `reconcile` (4), and
+  `main` always passing `require_tag=False` (3). All turned the self-test red. Removing the
+  apostrophe stripping inside `uncell()` itself is a different mutant, and it fails 14 checks. I
+  did not rerun the wider sweep described next.
 - **Mutants the self-test cannot tell apart.** I ran a mutation sweep of the code above
   `self_test()` on an earlier build, before the vintage line and the `district_key` change. Two
   surviving mutants are equivalent. A further dozen or so are cosmetic or sit on a boundary that
@@ -519,10 +536,11 @@ and not only people.
   `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
   labels (the tilde) is not pinned by the self-test. Replacing `math.fsum` with `sum` is caught on
   Python 3.11 and earlier only. On 3.12 and 3.13 the built-in `sum` is compensated, so the Python
-  3.9 and 3.10 runs are the ones that catch it.
+  3.9, 3.10 and 3.11 runs are the ones that catch it.
 - **Blank and odd lines.** A trailing line of spaces or commas is a malformed row and ends the run
-  with exit 2, not a skipped blank line. Only comma separated files are read; a semicolon or tab
-  file exits 2 with a missing-GEOID-column message that does not name the delimiter. A blank
+  with exit 2, not a skipped blank line. Only comma separated files are read. A semicolon file exits 2 with a
+  missing-GEOID-column message that does not name the delimiter. A tab file exits 2 with `has an
+  empty or non-ASCII column name`, because the tab is rejected before the GEOID column is looked for. A blank
   district cell, as a spatial join writes for a block outside the district tiling, is exit 2, not
   an `UNASSIGNED` refusal with exit 1.
 - **The output path is not checked for type.** A device name such as `NUL` or `/dev/null` is
@@ -567,8 +585,10 @@ Read on 2026-10-22, except where a line says otherwise.
   file object given to the reader "should be opened with newline=''", and the footnote adds that
   without it an extra \r is written on platforms that use \r\n line endings. blockfit opens its
   output with `newline=""` and reads through `io.StringIO(text, newline="")`.
-- Esri, Intersect tool and `SearchCursor` documentation (`doc.esri.com/en/arcgis-pro/latest/`): the
-  wording quoted above.
+- Esri, Intersect tool (`pro.arcgis.com/en/pro-app/latest/tool-reference/analysis/intersect.htm`)
+  and `SearchCursor` (`pro.arcgis.com/en/pro-app/latest/arcpy/data-access/searchcursor-class.htm`),
+  read on 2026-11-11: "Features or portions of features that overlap in all layers or feature
+  classes will be written to the output", and "SHAPE@AREA: A double of the feature's area."
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
   and the geographic coordinates warning.
 - OWASP, CSV Injection (`owasp.org/www-community/attacks/CSV_Injection`, read on 2026-11-11 at
