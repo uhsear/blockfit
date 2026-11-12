@@ -133,7 +133,7 @@ PASS  the harness records a false check, a missing exception and a wrong excepti
 ```
 
 The block is abridged. `...` marks each place where lines are left out. The same 224 assertions pass
-on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
+on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
@@ -166,8 +166,9 @@ python blockfit.py --blocks blocks.csv --assignment assign.csv --year 2020 --cou
 python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001 --trust-year
 ```
 
-Each prints the district table and the reconciliation, and writes nothing. Drop `--trust-year` when
-one of the files has a `geoid20` or `geoid10` header.
+Each prints the district table and the reconciliation, and writes nothing. Drop `--trust-year` only
+when both files have a `geoid20` or `geoid10` header. One tagged file is not enough: a run with a
+tagged file and a plain `geoid` file is refused with exit 1.
 
 ```
 python blockfit.py --blocks blocks.csv --parts pieces.csv --year 2020 --county 99001 \
@@ -353,9 +354,9 @@ same inputs produce the same bytes.
 ### Spreadsheet formulas
 
 A spreadsheet runs a CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return as a
-formula. OWASP's CSV Injection page lists those characters, and a line feed too, and names one
-mitigation: put a single quote in front of the cell. A district label comes from your files, and
-so does the name of a count column, so blockfit does that for every text cell it writes. This
+formula. OWASP's CSV Injection page lists those characters, and a line feed too. Its sanitization steps include
+putting a single quote in front of the cell, and blockfit does that. A district label comes from your files, and
+so does the name of a count column, so blockfit does it for every text cell it writes. This
 includes the header row. Numbers are not text and are written as they are, so the block and count
 columns stay numeric.
 
@@ -544,8 +545,9 @@ and not only people.
 - **The guard and the year check were mutation tested by hand.** For this release I made six changes and
   ran the self-test on each: no guard on a data row in `write_csv` (7 failures), none on the
   header (3), `return district` in place of `return uncell(district)` in `cell_district` (5), no
-  second apostrophe for `'=C` in `cell` (7), `--trust-year` ignored in `reconcile` (4), and
-  `main` always passing `require_tag=False` (3). All turned the self-test red. Removing the
+  second apostrophe for `'=C` in `cell` (7), `--trust-year` ignored in `reconcile`, and
+  `main` always passing `require_tag=False`. All turned the self-test red. The counts depend on how
+  each mutant is written, so I do not quote them for the last two. Removing the
   apostrophe stripping inside `uncell()` itself is a different mutant, and it fails 14 checks. I
   did not rerun the wider sweep described next.
 - **Mutants the self-test cannot tell apart.** I ran a mutation sweep of the code above
@@ -584,18 +586,20 @@ and not only people.
 - **`--parts` with `--allow-unreconciled` writes every overlay block.** `--assign-out` then holds
   each GEOID from the overlay, including blocks the extract does not have, so the written file
   reads back through `--assignment` as an `ORPHAN` refusal. This follows from the override.
-- **Loose self-test labels.** Several labels say "exits 0" where the assertion is `EXIT_UNVERIFIED`
-  (3), for example a complete assignment under `--trust-year` with plain headers. The assertions
-  are right. The README does not quote those labels.
+- **Formula characters in a column name.** Only a column name starting with `=` is tested through
+  the command line. The other formula characters in a column name are tested through `cell()` alone.
+- **Tab and carriage return.** The guard for them cannot be reached from the command line, because
+  the reader strips or refuses them. Direct calls to `cell()` and `cell_district()` pin it.
+- **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
+  it back as `--assignment` needs `--trust-year` and exits 3.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
   header as a good one. Only the exit code and the report on stdout say that it is short.
 - **The self-test cleans up at the end, not after a crash.** The folder is removed after the checks
   run, passed or failed. A crash or a kill part way through leaves a `blockfit-*` folder in the
   system temporary directory. The self-test is the one run that writes without `--apply`, and
   only there.
-- **Not run elsewhere.** Windows with Python 3.9, 3.10, 3.11, 3.12 and 3.13, and Ubuntu with
-  Python 3.12. The 3.11 run was made once (224 assertions, 0 failed) and is not part of the quoted
-  capture. Not macOS.
+- **Where the self-test has not run.** It has not run on Python 3.11 or on macOS. It has run on
+  Windows with Python 3.9, 3.10, 3.12 and 3.13, and on Ubuntu with Python 3.12.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 

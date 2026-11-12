@@ -1086,7 +1086,7 @@ def self_test():
         del net_calls[:]
         code, out, err = run(base + ["--assignment", f_assign])
         check(code == EXIT_UNVERIFIED and "RECONCILED" in out and err == "",
-              "a complete assignment exits 0 and prints RECONCILED")
+              "a complete assignment under --trust-year exits 3 and prints RECONCILED")
         rows = [line.split() for line in out.splitlines()]
         check(["DISTRICT", "BLOCKS", "total", "arealand"] in rows and
               ["1", "2", "300", "3000"] in rows and ["2", "4", "430", "8100"] in rows,
