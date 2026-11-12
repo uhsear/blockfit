@@ -47,7 +47,7 @@ SAMPLE = 5            # example GEOIDs shown per reason; the counts are always e
 DIGITS = "0123456789"
 RESERVED_COLUMNS = ("district", "blocks")   # the summary CSV names its own
 # A spreadsheet runs a cell that starts with one of these as a formula (OWASP, CSV Injection).
-NULL_LABELS = ("-1", "null", "none", "nan", "n/a", "unassigned", "unknown")   # "no district"
+NULL_LABELS = ("-1", "null", "none", "nan", "na", "n/a", "unassigned", "unknown")   # "no district"
 FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 EXIT_OK = 0
@@ -864,6 +864,10 @@ def self_test():
           "holding 30 total" in text_of(null_report),
           "a district 0 that holds blocks is refused, with its block and people counts  "
           "<-- pinned defect")
+    na_report = rec([(G1, "1"), (G2, "1"), (G3, "2"), (G4, "2"), (G5, "2"), (G6, "NA")])
+    check(not na_report["ok"] and is_null_label("NA") and "NULL-DISTRICT: 1 block(s) hold the "
+          "district label(s) NA" in text_of(na_report),
+          "a district NA, which R writes for a missing value, is refused  <-- pinned defect")
     check(rec(GOOD)["ok"] and "NULL-DISTRICT" not in text_of(rec(GOOD)),
           "and an assignment with no such label is not")
 

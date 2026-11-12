@@ -89,6 +89,7 @@ PASS  an extract one person ABOVE the control total is refused too, not only one
 PASS  an empty extract is refused, not reconciled as 0 equals 0  <-- pinned defect
 ...
 PASS  a district 0 that holds blocks is refused, with its block and people counts  <-- pinned defect
+PASS  a district NA, which R writes for a missing value, is refused  <-- pinned defect
 ...
 PASS  a text cell that starts with an equals sign gets one apostrophe in front  <-- pinned defect
 ...
@@ -129,24 +130,24 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-227 assertions, 0 failed
+228 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 227 assertions pass
-on Windows with Python 3.13, 3.12, 3.10 and 3.9, with a writable clone of ArcGIS Pro's default
+The block is abridged. `...` marks each place where lines are left out. The same 228 assertions pass
+on Windows with Python 3.13, 3.12, 3.10 and 3.9, with a writable clone of an ArcGIS Pro
 Python environment (Python 3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
 which is the `python3 --version` line I printed before the run.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (901 statements, 188 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (903 statements, 188 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
 
 Python 3.9 or newer. Standard library only: `argparse`, `csv`, `io`, `math`, `os` and `sys`. The
 self-test also imports `ast`, `contextlib`, `runpy`, `shutil`, `socket`, `subprocess` and
-`tempfile`. It runs on a writable clone of ArcGIS Pro's default Python environment and on a plain `python3`. The self-test asserts this
+`tempfile`. It runs on a writable clone of an ArcGIS Pro Python environment and on a plain `python3`. The self-test asserts this
 import list, so a new dependency turns it red.
 
 ```
@@ -227,7 +228,7 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
 6. **The control total.** With `--control-total`, the extract's `--measure` must equal it.
 7. **Not empty.** An extract with no rows is `EMPTY`. Zero equals zero is not a reconciliation.
 8. **No "no district" label.** A district labelled `0` (or any run of zeros), `-1`, `null`, `none`,
-   `nan`, `n/a`, `unassigned` or `unknown`, in any letter case, that holds blocks is a
+   `nan`, `na`, `n/a`, `unassigned` or `unknown`, in any letter case, that holds blocks is a
    `NULL-DISTRICT` refusal. GIS tools write those labels for a block that no district holds, so
    the table would carry a phantom district. If one is a real district, rename it in your file.
 
@@ -437,8 +438,8 @@ The table is still written, still loaded into a map, and the warning scrolls off
 blockfit writes nothing when it refuses. `--allow-unreconciled` writes the short table on purpose,
 and the run still exits 1.
 
-Comparing only population hides a second loss. Under a centroid rule, the blocks that fall out are
-often the empty ones: water, and a highway median. They move no population total. The self-test
+Comparing only population hides a second loss. Under a centroid rule, a block that falls out may be
+an empty one, such as water or a highway median. It moves no population total. The self-test
 removes a block with 0 people and asserts that the run is refused anyway, because it counts blocks
 and not only people.
 
@@ -494,10 +495,6 @@ and not only people.
   that Excel can remove escape characters when it saves a CSV and opens it again, which would make
   a cell active again. I did not open the files in Excel, LibreOffice or Google Sheets for this
   release. The test is that no written cell starts with one of the seven characters.
-- **The guard tests reach tab and carriage return indirectly.** A tab, a carriage return or a line
-  feed cannot reach a label or a column name, because the reader strips or refuses them. The
-  command line tests reach those two characters only through a label's leading whitespace. The
-  unit tests call `cell()` and `write_csv()` with them directly.
 - **No network code path.** blockfit.py has no `urllib`, `http` or `socket` use outside the
   self-test's trap, so there is nothing to exercise against a local `http.server` stub.
 - **A spreadsheet can still reread plain labels.** The guard stops formulas, not data mangling. A
@@ -508,7 +505,7 @@ and not only people.
   reachable this way and the output stays ASCII.
 - **The report is not guarded.** The district labels printed to stdout are written as they are,
   because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
-- **The no-district list is fixed.** A label such as `<Null>` or `NA` is not on it, so it reconciles as a real district. So do `0.0`, `-0` and `-1.0`, because only `-1` and runs of plain zeros are on it. Read the district table.
+- **The no-district list is fixed.** A label such as `<Null>` is not on it, so it reconciles as a real district. (`NA` is on it, because R's `write.csv` writes `NA` for a missing value.) So do `0.0`, `-0` and `-1.0`, because only `-1` and runs of plain zeros are on it. Read the district table.
 - **Spreadsheets drop leading zeros from a GEOID.** `--assign-out` writes the GEOID as bare
   digits. A spreadsheet that opens and saves the file can drop the zero from a state code such
   as `09`. blockfit then refuses the file on read-back with a 14 digit message and exit 2.
@@ -591,9 +588,19 @@ and not only people.
   reads back through `--assignment` as an `ORPHAN` refusal. This follows from the override.
 - **Formula characters in a column name.** Only a count-column header starting with `=` is tested end
   to end; the other leading characters are tested through `cell()`.
-- **Tab and carriage return.** A tab or carriage return cannot reach a written label or header from the
-  command line, because the reader strips or refuses them first. Direct calls to `cell()`,
-  `cell_district()` and `write_csv()` pin the guard. No assertion sends them through the CLI.
+- **Tab and carriage return.** A tab or carriage return cannot reach a written label or column name
+  from the command line, because the reader strips or refuses it first. Direct calls to `cell()`,
+  `cell_district()` and `write_csv()` pin the guard for those two characters.
+- **Other leading characters.** The guard covers the seven characters OWASP lists. A character that
+  a particular spreadsheet treats as special, such as a leading pipe, is written as it is.
+- **Outer Unicode whitespace is trimmed.** A district label with a no-break space or another
+  Unicode space at either end is read as the trimmed label. The same character inside a label is
+  refused as not printable ASCII.
+- **A missing `--measure` column is exit 2.** It is a usage mistake, but blockfit reports it as
+  `no <name> column`, exit 2, and not as exit 64.
+- **The Intersect remarks are from my own runs.** That Intersect copies the input attributes, and
+  that `Shape_Area` is the usual name for the area column, are not on the Esri page cited under
+  Sources checked.
 - **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
   it back as `--assignment` needs `--trust-year` and exits 3.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
@@ -611,7 +618,7 @@ and not only people.
 - **Windows carriage returns.** The statement that Windows adds carriage returns to a redirected
   capture is from my own runs. No entry in Sources checked cites Microsoft or Python for it.
 - **Where the self-test has not run.** It has not run on macOS. It has run on
-  Windows with Python 3.9, 3.10, 3.12 and 3.13, on Python 3.11 from a uv build (227 assertions, 0 failed), and on Ubuntu with Python 3.12.
+  Windows with Python 3.9, 3.10, 3.12 and 3.13, and on Python 3.11 (228 assertions, 0 failed), and on Ubuntu with Python 3.12.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
