@@ -202,7 +202,7 @@ Column names are not case sensitive. A GEOID column is `geoid`, `geoid10` or `ge
 may have only one of them. A header of `GEOID10` or `GEOID20` is also a claim about vintage, and
 blockfit checks it against `--year`.
 
-An output path that is also an input is a usage error. The tool will not overwrite its own input.
+An output path that is also an input is a usage error. The tool will not overwrite its own input, judged by path (see Limits for hard links).
 
 ## What it checks
 
@@ -344,7 +344,7 @@ which is a fact about the data. A file that could not be written is a fact about
 
 Without `--apply`, a normal run writes no file. The self-test lists the directory before and after
 a run without it, and asserts that the listing is unchanged. `--self-test` is the one exception:
-it writes about thirty-five fixture files into a new folder in the system temporary directory, runs
+it writes about forty fixture files into a new folder in the system temporary directory, runs
 against them, and deletes the folder when it ends, whether the checks passed or failed. It never writes beside the inputs or in the
 current directory.
 
@@ -602,8 +602,16 @@ and not only people.
   run, passed or failed. A crash or a kill part way through leaves a `blockfit-*` folder in the
   system temporary directory. The self-test is the one run that writes without `--apply`, and
   only there.
-- **Where the self-test has not run.** It has not run on Python 3.11 or on macOS. It has run on
-  Windows with Python 3.9, 3.10, 3.12 and 3.13, and on Ubuntu with Python 3.12.
+- **A closed stdout after the report.** If the reader closes stdout after the report was delivered,
+  blockfit may already have written the files and still exits 2, with `cannot write` and no file name.
+- **Statewide block files.** A block assignment file for a whole state fails check 5 (COUNTY),
+  because every block outside `--county` is refused. Cut the file to one county first.
+- **Device names on Windows.** `--out CON` or `--out nul` is reported as written and nothing is
+  stored. The exit code is 3 or 0, as for any other path.
+- **Windows carriage returns.** The statement that Windows adds carriage returns to a redirected
+  capture is from my own runs. No entry in Sources checked cites Microsoft or Python for it.
+- **Where the self-test has not run.** It has not run on macOS. It has run on
+  Windows with Python 3.9, 3.10, 3.12 and 3.13, on Python 3.11 from a uv build (227 assertions, 0 failed), and on Ubuntu with Python 3.12.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
 
