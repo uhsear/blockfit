@@ -345,7 +345,7 @@ which is a fact about the data. A file that could not be written is a fact about
 
 Without `--apply`, a normal run writes no file. The self-test lists the directory before and after
 a run without it, and asserts that the listing is unchanged. `--self-test` is the one exception:
-it writes about forty fixture files into a new folder in the system temporary directory, runs
+it writes 37 fixture files (the count I measured on Windows, Python 3.13) into a new folder in the system temporary directory, runs
 against them, and deletes the folder when it ends, whether the checks passed or failed. It never writes beside the inputs or in the
 current directory.
 
@@ -505,7 +505,7 @@ and not only people.
   reachable this way and the output stays ASCII.
 - **The report is not guarded.** The district labels printed to stdout are written as they are,
   because the report is text for a terminal and not a CSV. Only the two CSV files are guarded.
-- **The no-district list is fixed.** A label such as `<Null>` is not on it, so it reconciles as a real district. (`NA` is on it, because R's `write.csv` writes `NA` for a missing value.) So do `0.0`, `-0` and `-1.0`, because only `-1` and runs of plain zeros are on it. Read the district table.
+- **The no-district list is fixed.** It is not complete. A label such as `#N/A`, which GIS and spreadsheet tools write, or `<Null>` is not on it, so it reconciles as a real district. (`NA` is on it, because R's `write.csv` writes `NA` for a missing value.) So do `0.0`, `-0` and `-1.0`, because only `-1` and runs of plain zeros are on it. Read the district table.
 - **Spreadsheets drop leading zeros from a GEOID.** `--assign-out` writes the GEOID as bare
   digits. A spreadsheet that opens and saves the file can drop the zero from a state code such
   as `09`. blockfit then refuses the file on read-back with a 14 digit message and exit 2.
@@ -537,8 +537,9 @@ and not only people.
   and the run exits 2. With both flags, a failure on the second leaves the first file written. The
   exit code is 2.
 - **The input check is by path.** The test that an output is an input uses `realpath` and
-  `normcase`. It does not follow hard links, NTFS alternate data streams or 8.3 short names. It is
-  case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
+  `normcase`. On Windows, `realpath` resolves the 8.3 short name of an existing file to its long
+  name (I checked this with `PROGRA~1`), so that alias is caught. The test does not follow hard links
+  or NTFS alternate data streams. It is case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
   point `--out` at a hard link of an input.
 - **The guard and the year check were mutation tested by hand.** For this release I made six changes and
   ran the self-test on each: no guard on a data row in `write_csv` (8 failures), none on the
@@ -563,8 +564,8 @@ and not only people.
   `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
   labels (the tilde) is not pinned by the self-test. Replacing `math.fsum` with `sum` is caught on
   Python 3.9 and 3.10 in the runs made here. The Python documentation says the built-in `sum` is
-  compensated from 3.12. I did not run that mutant on 3.11. The 3.9 and 3.10 runs are the ones
-  that catch it.
+  compensated from 3.12. I ran that mutant on 3.11.15 as well, and it is caught there (1 failure).
+  The 3.9 and 3.10 runs catch it too.
 - **Blank and odd lines.** A trailing line of spaces or commas is a malformed row and ends the run
   with exit 2, not a skipped blank line. Only comma separated files are read. A semicolon file exits 2 with a
   missing-GEOID-column message that does not name the delimiter. A tab file exits 2 with `has an
@@ -602,7 +603,8 @@ and not only people.
   that `Shape_Area` is the usual name for the area column, are not on the Esri page cited under
   Sources checked.
 - **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
-  it back as `--assignment` needs `--trust-year` and exits 3.
+  it back as `--assignment` is refused with `UNVERIFIED-VINTAGE` (exit 1) unless you give
+  `--trust-year`, and then it exits 3.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
   header as a good one. Only the exit code and the report on stdout say that it is short.
 - **The self-test cleans up at the end, not after a crash.** The folder is removed after the checks
@@ -617,6 +619,18 @@ and not only people.
   stored. The exit code is 3 or 0, as for any other path.
 - **Windows carriage returns.** The statement that Windows adds carriage returns to a redirected
   capture is from my own runs. No entry in Sources checked cites Microsoft or Python for it.
+- **Windows facts have no Microsoft citation.** The `NUL` device behaviour, `realpath` resolving
+  8.3 aliases and the carriage returns in a redirected capture are all from my own runs. Sources
+  checked holds no Microsoft page for any of them.
+- **The pl94 header was not re-checked.** The 15 column, 14 count claim comes from the synthetic CSV
+  the self-test loads. I did not open pl94 or a file it wrote for this release.
+- **A path you pass is opened as typed.** A UNC path given to `--blocks`, `--assignment`, `--parts`
+  or `--out` makes the operating system contact that host. Paths come only from the command line,
+  never from file data.
+- **Wrong exit code with no stdout.** With stdout closed before the process starts (`>&-`, or
+  `pythonw`), the run ends in an `AttributeError` traceback and exits 1, not 2.
+- **Hard links.** Under `--apply`, an `--out` that is a hard link of an input overwrites that input
+  and the run exits 3. I verified this by rewriting a test input.
 - **Where the self-test has not run.** It has not run on macOS. It has run on
   Windows with Python 3.9, 3.10, 3.12 and 3.13, and on Python 3.11 (228 assertions, 0 failed), and on Ubuntu with Python 3.12.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
