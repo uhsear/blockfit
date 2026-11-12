@@ -134,7 +134,7 @@ PASS  the harness records a false check, a missing exception and a wrong excepti
 ```
 
 The block is abridged. `...` marks each place where lines are left out. The same 228 assertions pass
-on Windows with Python 3.13, 3.12, 3.10 and 3.9, with a writable clone of an ArcGIS Pro
+on Windows with Python 3.13, 3.12, 3.11, 3.10 and 3.9, with a writable clone of an ArcGIS Pro
 Python environment (Python 3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
@@ -632,9 +632,13 @@ and not only people.
 - **Hard links.** Under `--apply`, an `--out` that is a hard link of an input overwrites that input
   and the run exits 3. I verified this by rewriting a test input.
 - **Where the self-test has not run.** It has not run on macOS. It has run on
-  Windows with Python 3.9, 3.10, 3.12 and 3.13, and on Python 3.11 (228 assertions, 0 failed), and on Ubuntu with Python 3.12.
+  Windows with Python 3.9, 3.10, 3.11, 3.12 and 3.13 (228 assertions, 0 failed each), and on Ubuntu with Python 3.12.
   The self-test never imports `arcpy`, so it says nothing about how blockfit behaves on data
   that came out of ArcGIS Pro.
+- **Short names were not re-checked.** The 8.3 short-name claim rests on one `PROGRA~1` probe. Short names are off on the volume I used for the later runs, so I could not repeat it.
+- **Alternate data streams.** On Windows 3.13.2, `--out b2.csv::$DATA` was refused like any other alias in one probe. Treat that as an observation, not a guarantee.
+- **Run it as `python blockfit.py`.** The file has no executable bit, and a checkout with CRLF line endings breaks the shebang on Linux, so `./blockfit.py` can fail.
+- **`math.fsum` is uncited.** The statement that it returns the correctly rounded sum is my reading of the Python documentation, which Sources checked does not quote.
 
 ## Sources checked
 
