@@ -129,23 +129,24 @@ PASS  the file imports only the standard library: no arcpy, no third party packa
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-224 assertions, 0 failed
+227 assertions, 0 failed
 ```
 
-The block is abridged. `...` marks each place where lines are left out. The same 224 assertions pass
-on Windows with Python 3.13, 3.12, 3.10 and 3.9, with ArcGIS Pro's own Python (3.13.7), and on
+The block is abridged. `...` marks each place where lines are left out. The same 227 assertions pass
+on Windows with Python 3.13, 3.12, 3.10 and 3.9, with a writable clone of ArcGIS Pro's default
+Python environment (Python 3.13.7), and on
 Ubuntu with Python 3.12.3. The full output on
 Windows (3.13) and the full output on Ubuntu are identical once the carriage returns that Windows
 adds to a redirected capture are removed. That leaves only the first line of the Ubuntu capture,
 which is the `python3 --version` line I printed before the run.
-Branch coverage of `blockfit.py` under `--self-test` is 100 percent (895 statements, 188 branches,
+Branch coverage of `blockfit.py` under `--self-test` is 100 percent (901 statements, 188 branches,
 coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure coverage on Ubuntu.
 
 ## Requirements
 
 Python 3.9 or newer. Standard library only: `argparse`, `csv`, `io`, `math`, `os` and `sys`. The
 self-test also imports `ast`, `contextlib`, `runpy`, `shutil`, `socket`, `subprocess` and
-`tempfile`. It runs on ArcGIS Pro's default Python environment and on a plain `python3`. The self-test asserts this
+`tempfile`. It runs on a writable clone of ArcGIS Pro's default Python environment and on a plain `python3`. The self-test asserts this
 import list, so a new dependency turns it red.
 
 ```
@@ -496,7 +497,7 @@ and not only people.
 - **The guard tests reach tab and carriage return indirectly.** A tab, a carriage return or a line
   feed cannot reach a label or a column name, because the reader strips or refuses them. The
   command line tests reach those two characters only through a label's leading whitespace. The
-  unit tests call `cell()` with them directly.
+  unit tests call `cell()` and `write_csv()` with them directly.
 - **No network code path.** blockfit.py has no `urllib`, `http` or `socket` use outside the
   self-test's trap, so there is nothing to exercise against a local `http.server` stub.
 - **A spreadsheet can still reread plain labels.** The guard stops formulas, not data mangling. A
@@ -543,8 +544,8 @@ and not only people.
   case sensitive on a case-insensitive POSIX file system, such as the default on macOS. Do not
   point `--out` at a hard link of an input.
 - **The guard and the year check were mutation tested by hand.** For this release I made six changes and
-  ran the self-test on each: no guard on a data row in `write_csv` (7 failures), none on the
-  header (3), `return district` in place of `return uncell(district)` in `cell_district` (5), no
+  ran the self-test on each: no guard on a data row in `write_csv` (8 failures), none on the
+  header (4), `return district` in place of `return uncell(district)` in `cell_district` (5), no
   second apostrophe for `'=C` in `cell` (7), `--trust-year` ignored in `reconcile`, and
   `main` always passing `require_tag=False`. All turned the self-test red. The counts depend on how
   each mutant is written, so I do not quote them for the last two. Removing the
@@ -552,12 +553,14 @@ and not only people.
   did not rerun the wider sweep described next.
 - **Mutants the self-test cannot tell apart.** I ran a mutation sweep of the code above
   `self_test()` on an earlier build, before the vintage line and the `district_key` change. Two
-  surviving mutants are equivalent. A further dozen or so are cosmetic or sit on a boundary that
+  mutants survived that sweep and a later read showed they were not equivalent. One changes `sample()` so
+  that exactly 5 items print with "(first 5 of 5)". The other removes the `if not args.apply: return code`
+  guard, so a refused run without `--apply` writes the "nothing written" line to stderr. Neither
+  changes a verdict, an exit code, stdout or a file. The self-test now pins both, and both
+  mutants fail it. A further dozen or so survivors are cosmetic or sit on a boundary that
   the self-test does not pin. None of them could change a verdict or a write, and the decision core
-  had no other survivor. I did not repeat the sweep after those two changes. The two equivalent
-  mutants are the `sample()` boundary (exactly 5 items prints without "first 5 of 5"), which has no
-  observable difference that a test could pin, and the second `if not args.apply: return code`
-  guard, which is redundant behind `usage_problem`. The unpinned ones: the self-test does not pin
+  had no other survivor. I did not repeat the sweep after the vintage and `district_key` changes.
+  The unpinned ones: the self-test does not pin
   the report's blank separator lines, the numbering of reasons (it starts at 1), the extract label
   in the header line, the assignment or parts word in the header line, the closing flush, or the
   `wrote` line for `--assign-out`. The upper boundary of the printable-ASCII rule for district
@@ -586,10 +589,11 @@ and not only people.
 - **`--parts` with `--allow-unreconciled` writes every overlay block.** `--assign-out` then holds
   each GEOID from the overlay, including blocks the extract does not have, so the written file
   reads back through `--assignment` as an `ORPHAN` refusal. This follows from the override.
-- **Formula characters in a column name.** Only a column name starting with `=` is tested through
-  the command line. The other formula characters in a column name are tested through `cell()` alone.
-- **Tab and carriage return.** The guard for them cannot be reached from the command line, because
-  the reader strips or refuses them. Direct calls to `cell()` and `cell_district()` pin it.
+- **Formula characters in a column name.** Only a count-column header starting with `=` is tested end
+  to end; the other leading characters are tested through `cell()`.
+- **Tab and carriage return.** A tab or carriage return cannot reach a written label or header from the
+  command line, because the reader strips or refuses them first. Direct calls to `cell()`,
+  `cell_district()` and `write_csv()` pin the guard. No assertion sends them through the CLI.
 - **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
   it back as `--assignment` needs `--trust-year` and exits 3.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same

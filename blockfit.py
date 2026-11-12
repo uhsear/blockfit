@@ -725,6 +725,8 @@ def self_test():
           "<-- pinned defect")
     check(sample(["a", "b"]) == "a, b" and "first 5 of 7" in sample(list("abcdefg")),
           "sample shows five and says how many there are")
+    check(sample(list("abcde")) == "a, b, c, d, e" and sample(list("abcdef")).endswith("(first 5 of 6)"),
+          "sample says nothing about the count at exactly five items, and does at six")
 
     # ---- collect_assignment
     a, rep, con = collect_assignment([(G1, "1"), (G1, "1"), (G2, "1"), (G2, "2"), (G3, "2")])
@@ -1101,6 +1103,8 @@ def self_test():
         code, out, err = run(base + ["--assignment", f_lost])
         check(code == 1 and "REFUSED: 1 reason(s)" in out and "350 total" in out,
               "an assignment that loses the water block exits 1 and names the 350 people")
+        check(err == "", "and a refused run without --apply prints nothing to stderr, because nothing "
+              "was going to be written")
         check("districts 380 / extract 730" in out,
               "and prints the short district sum against the extract")
 
@@ -1296,6 +1300,13 @@ def self_test():
               slurp(o14) == ("geoid,district\n%s,'=SUM(A1)\n%s,'-2\n%s,Ward 3\n"
                              % (g0, g1, g2)).encode(),
               "the README's formula example writes exactly the two files the README shows")
+        o15 = os.path.join(tmp, "tabcr.csv")
+        write_csv(o15, ["district", "\t=h", "\r+h"], [["\t=a", 1, 2], ["\r@b", 3, 4]])
+        tabcr = slurp(o15)
+        check(all(part in tabcr for part in (b"'\t=h", b"'\r+h", b"'\t=a", b"'\r@b", b",1,2\n", b",3,4\n"))
+              and tabcr.startswith(b"district,"),
+              "write_csv guards a tab or carriage return in a header and in a data cell, and "
+              "leaves the numbers bare")
 
         # --- usage errors
         def usage(argv, label):
