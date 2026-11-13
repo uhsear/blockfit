@@ -146,7 +146,7 @@ coverage.py 7.16.1, measured on Windows with Python 3.13). I did not measure cov
 ## Requirements
 
 Python 3.9 or newer. Standard library only: `argparse`, `csv`, `io`, `math`, `os` and `sys`. The
-self-test also imports `ast`, `contextlib`, `runpy`, `shutil`, `socket`, `subprocess` and
+self-test also imports `__future__`, `ast`, `contextlib`, `runpy`, `shutil`, `socket`, `subprocess` and
 `tempfile`. It runs on a writable clone of an ArcGIS Pro Python environment and on a plain `python3`. The self-test asserts this
 import list, so a new dependency turns it red.
 
@@ -234,8 +234,8 @@ Each check below is a refusal. A refusal prints a reason and exits 1.
 
 9. **The vintage must be checkable.** When either file lacks a `GEOID10` or `GEOID20` tag,
    nothing in that file says which decade it is, and `--year` is only your claim for it. That is an
-   `UNVERIFIED-VINTAGE` refusal, with exit 1. `pl94` writes a plain `geoid` header, so this is the
-   common case. If you know the year, pass `--trust-year`. The run then says so in the report and
+   `UNVERIFIED-VINTAGE` refusal, with exit 1. From its source, `pl94` writes a plain `geoid` header
+   (not re-checked for this release), so this is the common case. If you know the year, pass `--trust-year`. The run then says so in the report and
    on the verdict line, `RECONCILED (vintage not verified): ...`, and exits 3 when every other
    check passes, because the tool could not tell the decade. Tags on both files give the plain
    `RECONCILED:` line, need no flag, and exit 0. One tag is not enough.
@@ -266,11 +266,14 @@ in the same district are added. The block goes to the district with the largest 
   goes to `2`. The tie count is printed.
 - A piece with an area of 0 is ignored and counted. A block with no positive piece is left out of
   the assignment, so the reconciliation reports it as unassigned.
-- The areas are added with `math.fsum`, which returns the correctly rounded sum of the exact inputs.
-  A running float sum depends on the order of the rows, and the built-in `sum` is only compensated
-  from Python 3.12. The self-test pins a case where order decides the tie. That pin catches a switch
-  to `sum` on Python 3.9 and 3.10 in the runs made here. On 3.12 and later `sum` gives the same
-  answer.
+- The areas are added with `math.fsum`, which the Python documentation calls an accurate sum that
+  tracks multiple intermediate partial sums. A running float sum depends on the order of the rows,
+  and the built-in `sum` is only compensated from Python 3.12. The self-test pins one case where
+  order decides the tie. That pin catches a switch to `sum` on Python 3.9 and 3.10 in the runs made
+  here, and it passes with `sum` on 3.12 and 3.13. `sum` and `fsum` still differ on other inputs on
+  3.12 and 3.13 (for `[5.764607523034235e+17, 844424930131968.0, -192.0, 8.881784197001252e-16]`,
+  `sum` gives `5.773051772335552e+17` and `fsum` gives `5.773051772335553e+17` on 3.12.10 and
+  3.13.2), so the pin does not show that `sum` is safe there.
 - The report counts blocks that touch more than one district and the people in them. The rule puts
   each whole block in one district, so that number is an upper bound on the people it can place in
   the wrong one.
@@ -312,7 +315,7 @@ too.
 ## Producing the inputs
 
 The extract is a CSV with a GEOID column and count columns. The CSV that
-[pl94](https://github.com/uhsear/pl94) writes fits: its 15 columns load, 14 of them as counts, and
+[pl94](https://github.com/uhsear/pl94) writes fits, going by its source: the 15 columns it lists load, 14 of them as counts. I did not open a file pl94 wrote for this release, but
 the self-test loads a synthetic CSV with that header. blockfit does not read the PL 94-171 zip. The
 extract carries the people. It does not carry a second copy of the county total, which is why
 `--control-total` exists. Take the control from the county record in the same PL file, which pl94
@@ -468,7 +471,7 @@ and not only people.
   or `GEOID20` tag, or when the two block sets differ. Two files with a plain `geoid` header on the
   wrong decade and identical block sets reconcile. A wrong `--year` given with consistent files
   reconciles. `--year` is a claim that blockfit cannot verify. pl94 writes a plain `geoid` header
-  for both vintages, so without `--trust-year` a run with a plain file on either side is refused with
+  for both vintages (from its source, not re-checked for this release), so without `--trust-year` a run with a plain file on either side is refused with
   `UNVERIFIED-VINTAGE` and exit 1. With `--trust-year` the report says "vintage: not verified" and
   that the year is your claim, the verdict line reads `RECONCILED (vintage not verified)`, and the
   exit code is 3, not 0. Earlier versions exited 0 here, which let a wrong `--year` look the same
@@ -598,13 +601,17 @@ and not only people.
   Unicode space at either end is read as the trimmed label. The same character inside a label is
   refused as not printable ASCII.
 - **A missing `--measure` column is exit 2.** It is a usage mistake, but blockfit reports it as
-  `no <name> column`, exit 2, and not as exit 64.
+  `has no '<name>' column to count`, exit 2, and not as exit 64.
 - **The Intersect remarks are from my own runs.** That Intersect copies the input attributes, and
   that `Shape_Area` is the usual name for the area column, are not on the Esri page cited under
   Sources checked.
 - **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
   it back as `--assignment` is refused with `UNVERIFIED-VINTAGE` (exit 1) unless you give
   `--trust-year`, and then it exits 3.
+- **Labels that differ only by outer whitespace merge.** A label with a leading tab and the same label without it are read as one district,
+  because labels are trimmed before they are compared, and no warning says so.
+- **The summary file is not read back.** blockfit never reads the `--out` file, so only the
+  `--assign-out` file is covered by the apostrophe round trip.
 - **A short table has no marker.** A file written under `--allow-unreconciled` carries the same
   header as a good one. Only the exit code and the report on stdout say that it is short.
 - **The self-test cleans up at the end, not after a crash.** The folder is removed after the checks
@@ -638,7 +645,7 @@ and not only people.
 - **Short names were not re-checked.** The 8.3 short-name claim rests on one `PROGRA~1` probe. Short names are off on the volume I used for the later runs, so I could not repeat it.
 - **Alternate data streams.** On Windows 3.13.2, `--out b2.csv::$DATA` was refused like any other alias in one probe. Treat that as an observation, not a guarantee.
 - **Run it as `python blockfit.py`.** The file has no executable bit, and a checkout with CRLF line endings breaks the shebang on Linux, so `./blockfit.py` can fail.
-- **`math.fsum` is uncited.** The statement that it returns the correctly rounded sum is my reading of the Python documentation, which Sources checked does not quote.
+- **`math.fsum` is cited loosely.** Python documentation for `math.fsum` (`docs.python.org/3/library/math.html`, read on 2026-11-12): "Return an accurate floating-point sum of values in the iterable. Avoids loss of precision by tracking multiple intermediate partial sums." It also says the algorithm depends on IEEE-754 guarantees and that some non-Windows builds may be off in the least significant bit. The README therefore does not claim a correctly rounded result.
 
 ## Sources checked
 
@@ -676,7 +683,7 @@ Read on 2026-10-22, except where a line says otherwise.
   classes will be written to the output feature class", and, after the token `SHAPE@AREA` and a dash, "A double of the feature's area."
 - Python documentation, "What's New In Python 3.12" (`docs.python.org/3/whatsnew/3.12.html`, read
   on 2026-11-11): "sum() now uses Neumaier summation to improve accuracy and commutativity when
-  summing floats or mixed ints and floats." That is why `math.fsum` matters on 3.11 and earlier.
+  summing floats or mixed ints and floats." The change does not make `sum` agree with `math.fsum` on every input, so blockfit keeps `math.fsum` on all versions.
 - maup README (`github.com/mggg/maup`): the behaviour of `assign` and `doctor`, the MIT licence,
   and the geographic coordinates warning.
 - OWASP, CSV Injection (`owasp.org/www-community/attacks/CSV_Injection`, read on 2026-11-11 at
