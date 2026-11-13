@@ -126,9 +126,10 @@ def max_overlap(pieces):
     out of assign, so the reconcile reports it as unassigned. info["split"] maps each block
     that touches more than one district to how many.
 
-    math.fsum returns the correctly rounded sum of the exact inputs on every Python. The
-    built-in sum is only compensated from 3.12, so on 3.9 to 3.11 it could break a tie by
-    rounding, and the two hosts would disagree.
+    math.fsum tracks partial sums, so equal pieces in any order give the same total on the
+    hosts tested. The Python docs say it may be off in the least significant bit on some
+    non-Windows builds, so that is not claimed for every host. The built-in sum is only
+    compensated from 3.12, so on 3.9 to 3.11 it could break a tie by rounding.
     """
     parts = {}
     empty = 0

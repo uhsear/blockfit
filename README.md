@@ -44,8 +44,8 @@ REFUSED: 1 reason(s)
 ```
 
 The exit code is 1. County `99001` does not exist. Every number in this file comes from a synthetic
-fixture, so you can run all of it without a download. Most come from the fixture that `--self-test`
-builds. The two-file formula example under Output is a second, smaller fixture, and `--self-test`
+fixture, so no download is needed to reproduce it. The repo does not ship `blocks.csv`, `assign.csv`
+or `pieces.csv`. Most outputs come from the fixture that `--self-test` builds in a temporary folder. The two-file formula example under Output is a second, smaller fixture, and `--self-test`
 writes it too and compares the output byte for byte. `--trust-year` is explained under Usage: the two
 files here have plain `geoid` headers, so without it the run is also refused for an unverified year.
 
@@ -323,8 +323,9 @@ already reconciles to the extract.
 
 The assignment is `geoid,district`. The pieces are `geoid,district,area`, one row per piece of a
 block that lies in a district. In ArcGIS Pro, the Intersect tool writes "features or portions of
-features that overlap in all layers or feature classes" to its output, and copies the attributes of
-the inputs to it. That is the shape `--parts` needs. Export the block GEOID, the district and the
+features that overlap in all layers or feature classes" to its output. Its Usage text says "Attribute
+values from the input feature classes will be copied to the output feature class", and the
+`join_attributes` parameter defaults to `ALL`. That is the shape `--parts` needs. Export the block GEOID, the district and the
 polygon area. I have not run an Intersect for this release. The `SHAPE@AREA` token is documented as
 "a double of the feature's area" and the page does not say the units. blockfit compares areas as
 plain numbers and cannot know their unit. Take every area from one projection. maup's README warns
@@ -512,8 +513,9 @@ and not only people.
 - **Spreadsheets drop leading zeros from a GEOID.** `--assign-out` writes the GEOID as bare
   digits. A spreadsheet that opens and saves the file can drop the zero from a state code such
   as `09`. blockfit then refuses the file on read-back with a 14 digit message and exit 2.
-- **Parts input needs a column named exactly `area`.** An Intersect export often names it
-  `SHAPE_Area` or `Shape_Area`. Rename it first, or blockfit exits 2 with "has no 'area' column".
+- **Parts input needs a column named exactly `area`.** Esri's Intersect page does not name the
+  area field it writes, so check your export. Rename the column to `area` first, or blockfit
+  exits 2 with "has no 'area' column".
 - **A failed report write leaves stdout silenced.** blockfit points file descriptor 1 at the null
   device and does not restore it. A program that imports blockfit and calls `main()` loses its
   stdout for good after such a failure. The command line is not affected.
@@ -539,6 +541,12 @@ and not only people.
   written to a temporary file and renamed. A full disk part way through leaves a truncated table,
   and the run exits 2. With both flags, a failure on the second leaves the first file written. The
   exit code is 2.
+- **An existing output file is replaced without a prompt.** Under `--apply`, `--out` and
+  `--assign-out` overwrite a file that already exists. Only a path that is also an input is refused.
+- **An ArcGIS block export may carry decimal columns.** Columns such as `Shape_Area` and
+  `Shape_Length` hold decimals, and blockfit exits 2 with `is not a whole number` on any such column.
+  Remove them first. This follows from the code path that refuses `5.0`. I did not run it on a real
+  ArcGIS export.
 - **The input check is by path.** The test that an output is an input uses `realpath` and
   `normcase`. On Windows, `realpath` resolves the 8.3 short name of an existing file to its long
   name (I checked this with `PROGRA~1`), so that alias is caught. The test does not follow hard links
@@ -602,9 +610,11 @@ and not only people.
   refused as not printable ASCII.
 - **A missing `--measure` column is exit 2.** It is a usage mistake, but blockfit reports it as
   `has no '<name>' column to count`, exit 2, and not as exit 64.
-- **The Intersect remarks are from my own runs.** That Intersect copies the input attributes, and
-  that `Shape_Area` is the usual name for the area column, are not on the Esri page cited under
-  Sources checked.
+- **No Intersect was run.** The self-test exercises `--parts` on synthetic pieces only. That
+  Intersect copies the input attributes is on the Esri page cited under Sources checked ("Attribute
+  values from the input feature classes will be copied to the output feature class", and the
+  `join_attributes` default is `ALL`). The name of the area field in an Intersect output is not on
+  that page, so the README does not claim one.
 - **No round trip to exit 0.** A file written by `--assign-out` has a plain `geoid` header, so reading
   it back as `--assignment` is refused with `UNVERIFIED-VINTAGE` (exit 1) unless you give
   `--trust-year`, and then it exits 3.
@@ -679,7 +689,8 @@ Read on 2026-10-22, except where a line says otherwise.
   read on 2026-11-11. Esri now redirects both with HTTP 301 to
   `doc.esri.com/en/arcgis-pro/latest/tool-reference/analysis/intersect.html` and
   `doc.esri.com/en/arcgis-pro/latest/arcpy/data-access/searchcursor-class.html`, and both sentences
-  are on the new pages (checked 2026-11-11). The quoted sentences: "Features or portions of features that overlap in all layers or feature
+  are on the new pages (checked 2026-11-11; the Intersect attribute-copy sentence and the `ALL` default
+  were re-read on 2026-11-12). The quoted sentences: "Features or portions of features that overlap in all layers or feature
   classes will be written to the output feature class", and, after the token `SHAPE@AREA` and a dash, "A double of the feature's area."
 - Python documentation, "What's New In Python 3.12" (`docs.python.org/3/whatsnew/3.12.html`, read
   on 2026-11-11): "sum() now uses Neumaier summation to improve accuracy and commutativity when
